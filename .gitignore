@@ -1,6 +1,10 @@
 .env
 .pytest_cache/
+.pytest-packages/
+.pytest-deps/
+.tmp/
 __pycache__/
 .venv/
 storage/
-*.pyc
+*.py[cod]
+*.egg-info/

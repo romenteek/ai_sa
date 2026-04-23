@@ -33,4 +33,5 @@ package-dir = {"" = "."}
 include = ["app*"]
 
 [tool.pytest.ini_options]
+addopts = "-ra"
 testpaths = ["tests"]

@@ -57,6 +57,22 @@ uvicorn app.main:app --reload
 pytest
 ```
 
+## Alternative local verification
+
+If the local Python environment cannot see `pytest` after install, use a repository-local package directory:
+
+```powershell
+python -m pip install --upgrade pip
+New-Item -ItemType Directory -Force .tmp, .pytest-packages | Out-Null
+$env:TEMP = (Resolve-Path .tmp)
+$env:TMP = (Resolve-Path .tmp)
+python -m pip install --target .pytest-packages pytest
+python -m compileall app tests
+python scripts/run_pytest.py
+```
+
+This keeps the MVP `app/` layout intact while avoiding user-site and broken virtualenv issues that showed up in this environment.
+
 ## VPS notes
 
 - Install Docker Engine and Docker Compose plugin
