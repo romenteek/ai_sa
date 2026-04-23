@@ -1,10 +1,65 @@
-# ai_sa
+# AI System Analyst MVP
 
-Minimal repository bootstrap for reliable local verification.
+Internal service for ingesting specifications and architecture documents, retrieving grounded architecture context, and producing reviewable implementation tasks before any Jira export.
 
-## Local setup
+## What is implemented in this first pass
 
-Install the test dependency into a repository-local directory:
+- FastAPI backend scaffold
+- PostgreSQL + pgvector data model and Alembic migration
+- Local file storage for uploaded documents
+- Text document ingestion with chunking and metadata
+- Basic review-oriented document APIs
+- Jira export stub endpoint that is disabled by default
+- Core tests for chunking and upload flow
+
+## Current limitations
+
+- Extraction currently supports plain text style files (`.txt`, `.md`)
+- Embedding generation and vector retrieval are scaffolded but not yet active
+- Analysis generation and review workflow are partially scaffolded and will be expanded in later milestones
+
+## Local run
+
+1. Copy `.env.example` to `.env`
+2. Start services:
+
+```bash
+docker compose up --build
+```
+
+3. Run migrations in another shell:
+
+```bash
+docker compose exec api alembic upgrade head
+```
+
+4. Open the API docs at `http://localhost:8000/docs`
+
+## Local development without Docker
+
+1. Create a virtual environment
+2. Install dependencies:
+
+```bash
+pip install -e .[dev]
+```
+
+3. Set environment variables from `.env.example`
+4. Run the API:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+5. Run tests:
+
+```bash
+pytest
+```
+
+## Alternative local verification
+
+If the local Python environment cannot see `pytest` after install, use a repository-local package directory:
 
 ```powershell
 python -m pip install --upgrade pip
@@ -12,27 +67,23 @@ New-Item -ItemType Directory -Force .tmp, .pytest-packages | Out-Null
 $env:TEMP = (Resolve-Path .tmp)
 $env:TMP = (Resolve-Path .tmp)
 python -m pip install --target .pytest-packages pytest
-```
-
-## Verification
-
-Run these commands from the repository root:
-
-```powershell
-python -m compileall src tests
+python -m compileall app tests
 python scripts/run_pytest.py
 ```
 
-Why this workflow is reliable:
+This keeps the MVP `app/` layout intact while avoiding user-site and broken virtualenv issues that showed up in this environment.
 
-- `compileall` checks Python syntax in the package and tests.
-- `scripts/run_pytest.py` adds the repository `src/` directory to `sys.path`, so tests do not depend on the current working directory.
-- `python -m pip install --target .pytest-packages pytest` keeps the test dependency inside the repository, which avoids user-site and virtualenv inconsistencies in this environment.
+## VPS notes
 
-## Environment note
+- Install Docker Engine and Docker Compose plugin
+- Copy `.env.example` to `.env` and update secrets
+- Run `docker compose up --build -d`
+- Run `docker compose exec api alembic upgrade head`
+- Mount a persistent volume for `./storage`
 
-In this Codex execution environment, `python -m venv .venv` failed during `ensurepip`, and `pip install -e .[dev]` did not produce an importable `pytest` for the active interpreter. Those limitations appear to be environment-specific rather than repository-specific. The repository-local verification commands above avoid both issues.
+## Main API flow today
 
-## Current repository scope
-
-The canonical remote currently contains only `AGENTS.md` plus this verification bootstrap. Product features, retrieval work, and analysis API expansion are intentionally out of scope for this turn.
+1. Upload a document with `POST /api/v1/documents/upload`
+2. Inspect stored documents with `GET /api/v1/documents`
+3. Review chunks with `GET /api/v1/documents/{document_id}`
+4. See Jira export safety stub with `POST /api/v1/exports/jira`

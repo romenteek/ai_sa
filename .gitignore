@@ -1,7 +1,10 @@
-.pytest-deps/
+.env
+.pytest_cache/
 .pytest-packages/
+.pytest-deps/
 .tmp/
-.venv/
 __pycache__/
+.venv/
+storage/
 *.py[cod]
 *.egg-info/
