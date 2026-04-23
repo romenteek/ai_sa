@@ -1,7 +1,11 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+ReviewStatus = Literal["draft", "reviewed", "approved", "rejected"]
 
 
 class SourceReference(BaseModel):
@@ -54,9 +58,27 @@ class AnalysisRunCreateRequest(BaseModel):
 class AnalysisRunResponse(AnalysisOutput):
     id: UUID
     status: str
+    review_status: ReviewStatus
+    reviewer_note: str = ""
     document_id: UUID | None = None
     request_payload: dict = Field(default_factory=dict)
     validation_notes: str = ""
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AnalysisRunListItem(BaseModel):
+    id: UUID
+    status: str
+    review_status: ReviewStatus
+    reviewer_note: str = ""
+    document_id: UUID | None = None
+    feature_summary: str
+    confidence: float = 0.0
+    created_at: datetime
+
+
+class AnalysisRunReviewUpdateRequest(BaseModel):
+    review_status: ReviewStatus
+    reviewer_note: str = Field(default="", max_length=4000)

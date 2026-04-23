@@ -10,6 +10,8 @@ from app.models.generated_task import GeneratedTask
 from app.schemas.analysis import (
     AnalysisOutput,
     AnalysisRunCreateRequest,
+    AnalysisRunListItem,
+    AnalysisRunReviewUpdateRequest,
     AnalysisRunResponse,
     GeneratedTaskPayload,
     SourceReference,
@@ -25,6 +27,7 @@ TASK_SECTION_NAMES = (
     "qa_tasks",
     "observability_tasks",
 )
+REVIEW_STATUSES = ("draft", "reviewed", "approved", "rejected")
 
 
 class AnalysisRunService:
@@ -47,6 +50,8 @@ class AnalysisRunService:
         run = AnalysisRun(
             document_id=payload.document_ids[0] if payload.document_ids else None,
             status="completed",
+            review_status="draft",
+            reviewer_note="",
             request_payload=payload.model_dump(mode="json"),
             output_payload=output.model_dump(mode="json"),
             validation_notes=validation_notes,
@@ -67,6 +72,45 @@ class AnalysisRunService:
         run = self.db.scalars(statement).first()
         if run is None:
             return None
+        return self._to_response(run)
+
+    def list_runs(self) -> list[AnalysisRunListItem]:
+        statement = select(AnalysisRun).order_by(AnalysisRun.created_at.desc())
+        runs = self.db.scalars(statement).all()
+        items: list[AnalysisRunListItem] = []
+        for run in runs:
+            output = AnalysisOutput.model_validate(run.output_payload or {})
+            items.append(
+                AnalysisRunListItem(
+                    id=run.id,
+                    status=run.status,
+                    review_status=run.review_status,
+                    reviewer_note=run.reviewer_note or "",
+                    document_id=run.document_id,
+                    feature_summary=output.feature_summary,
+                    confidence=output.confidence,
+                    created_at=run.created_at,
+                )
+            )
+        return items
+
+    def update_review(
+        self,
+        analysis_run_id: UUID,
+        payload: AnalysisRunReviewUpdateRequest,
+    ) -> AnalysisRunResponse | None:
+        run = self.db.get(AnalysisRun, analysis_run_id)
+        if run is None:
+            return None
+
+        if payload.review_status not in REVIEW_STATUSES:
+            raise ValueError(f"Unsupported review status: {payload.review_status}")
+
+        run.review_status = payload.review_status
+        run.reviewer_note = payload.reviewer_note.strip()
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
         return self._to_response(run)
 
     def _build_output(
@@ -466,6 +510,8 @@ class AnalysisRunService:
         return AnalysisRunResponse(
             id=run.id,
             status=run.status,
+            review_status=run.review_status,
+            reviewer_note=run.reviewer_note or "",
             document_id=run.document_id,
             request_payload=run.request_payload or {},
             validation_notes=run.validation_notes,

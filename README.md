@@ -2,7 +2,7 @@
 
 Internal service for ingesting specifications and architecture documents, retrieving grounded architecture context, and producing reviewable implementation tasks before any Jira export.
 
-## What works in Milestone 2
+## What works in Milestone 3
 
 - FastAPI backend scaffold
 - PostgreSQL + pgvector data model and Alembic migrations
@@ -14,14 +14,28 @@ Internal service for ingesting specifications and architecture documents, retrie
 - Analysis run persistence in `analysis_runs`
 - Analysis run API endpoints:
   - `POST /api/v1/analysis-runs`
+  - `GET /api/v1/analysis-runs`
   - `GET /api/v1/analysis-runs/{analysis_run_id}`
+  - `PATCH /api/v1/analysis-runs/{analysis_run_id}/review`
 - Deterministic analysis output that returns the strict JSON contract and preserves:
   - `source_references`
   - task-level `source_refs`
   - confidence values
   - explicit `open_questions` and `assumptions` when context is thin
+- Internal review UI pages for:
+  - dashboard at `/`
+  - document upload/list/detail at `/documents`
+  - analysis creation at `/analysis-runs/new`
+  - analysis run queue at `/analysis-runs`
+  - full structured review page at `/analysis-runs/{analysis_run_id}`
+- Persisted review workflow fields on analysis runs:
+  - `draft`
+  - `reviewed`
+  - `approved`
+  - `rejected`
+- Reviewer note storage for review decisions
 - Jira export stub endpoint that is disabled by default
-- Targeted tests for retrieval, upload, and analysis run APIs
+- Targeted tests for retrieval, upload, analysis APIs, review status updates, and key UI routes
 
 ## Still pending or intentionally stubbed
 
@@ -30,6 +44,7 @@ Internal service for ingesting specifications and architecture documents, retrie
 - Retrieval currently uses deterministic text ranking rather than embedding similarity
 - Analysis generation is deterministic and rule-based for now; no heavy LLM integration is active
 - Jira export remains a manual approval stub only
+- Jira export does not use review status yet; approval is captured for human review only
 - PDF and DOCX ingestion are intentionally out of scope for this milestone
 
 ## Local run
@@ -48,14 +63,38 @@ docker compose exec api alembic upgrade head
 ```
 
 4. Open the API docs at `http://localhost:8000/docs`
+5. Open the internal review UI at `http://localhost:8000/`
 
-## Main API flow now
+## Main flow now
 
 1. Upload a document with `POST /api/v1/documents/upload`
-2. Inspect stored documents with `GET /api/v1/documents`
-3. Start an analysis run with `POST /api/v1/analysis-runs`
-4. Retrieve a stored run with `GET /api/v1/analysis-runs/{analysis_run_id}`
-5. See Jira export safety stub with `POST /api/v1/exports/jira`
+2. Inspect stored documents with `GET /api/v1/documents` or `/documents`
+3. Start an analysis run with `POST /api/v1/analysis-runs` or `/analysis-runs`
+4. Review stored runs with `GET /api/v1/analysis-runs`, `GET /api/v1/analysis-runs/{analysis_run_id}`, or `/analysis-runs/{analysis_run_id}`
+5. Update review state with `PATCH /api/v1/analysis-runs/{analysis_run_id}/review` or the review form in the UI
+6. See Jira export safety stub with `POST /api/v1/exports/jira`
+
+## Review actions supported
+
+- Mark an analysis run as `draft`, `reviewed`, `approved`, or `rejected`
+- Store a short reviewer note with the decision
+- Inspect the full structured output in one page, including:
+  - `feature_summary`
+  - `affected_components`
+  - each generated task section
+  - `risks`
+  - `open_questions`
+  - `assumptions`
+  - `source_references`
+  - confidence values
+
+## What is still pending before Jira export is useful
+
+- Review status is persisted, but there is still no real Jira export implementation
+- Automatic Jira creation is intentionally not implemented
+- Export payload shaping against a real Jira project is still pending
+- PDF and DOCX ingestion are still out of scope
+- Embedding generation and pgvector similarity are still not active
 
 ### Example analysis request
 
