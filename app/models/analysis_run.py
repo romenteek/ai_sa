@@ -18,6 +18,8 @@ class AnalysisRun(Base):
         nullable=True,
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    reviewer_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
     request_payload: Mapped[dict] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
         default=dict,
