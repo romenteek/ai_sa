@@ -18,9 +18,16 @@ class AnalysisRun(Base):
         nullable=True,
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    request_payload: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        default=dict,
+    )
     output_payload: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=dict)
     validation_notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     document: Mapped["Document | None"] = relationship(back_populates="analysis_runs")
-    generated_tasks: Mapped[list["GeneratedTask"]] = relationship(back_populates="analysis_run")
+    generated_tasks: Mapped[list["GeneratedTask"]] = relationship(
+        back_populates="analysis_run",
+        cascade="all, delete-orphan",
+    )
