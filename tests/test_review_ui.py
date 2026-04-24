@@ -20,6 +20,15 @@ def test_dashboard_and_documents_ui_routes_render(client) -> None:
 
 
 def test_analysis_run_detail_ui_supports_review_updates(client) -> None:
+    project_response = client.post(
+        "/api/v1/projects",
+        json={
+            "name": "Review UI Project",
+            "source_type": "github",
+            "repository_url": "https://github.com/example/review-ui",
+        },
+    )
+    project_id = project_response.json()["id"]
     upload_response = client.post(
         "/api/v1/documents/upload",
         data={"kind": "specification"},
@@ -30,6 +39,7 @@ def test_analysis_run_detail_ui_supports_review_updates(client) -> None:
                     b"""
                     The backend API should preserve source references.
                     Frontend review pages must show confidence and assumptions.
+                    Acceptance criteria must cover review status updates.
                     """
                 ),
                 "text/markdown",
@@ -41,6 +51,9 @@ def test_analysis_run_detail_ui_supports_review_updates(client) -> None:
     create_response = client.post(
         "/analysis-runs",
         data={
+            "project_id": project_id,
+            "task_type": "feature",
+            "input_text": "Update review pages with acceptance criteria.",
             "query": "Review UI",
             "document_ids": document_id,
             "max_chunks": "4",
@@ -71,6 +84,15 @@ def test_analysis_run_detail_ui_supports_review_updates(client) -> None:
 
 
 def test_export_preview_ui_shows_payload_and_dry_run_confirmation(client) -> None:
+    project_response = client.post(
+        "/api/v1/projects",
+        json={
+            "name": "Export UI Project",
+            "source_type": "github",
+            "repository_url": "https://github.com/example/export-ui",
+        },
+    )
+    project_id = project_response.json()["id"]
     upload_response = client.post(
         "/api/v1/documents/upload",
         data={"kind": "specification"},
@@ -91,7 +113,14 @@ def test_export_preview_ui_shows_payload_and_dry_run_confirmation(client) -> Non
 
     create_response = client.post(
         "/analysis-runs",
-        data={"query": "Export preview UI", "document_ids": document_id, "max_chunks": "4"},
+        data={
+            "project_id": project_id,
+            "task_type": "technical_task",
+            "input_text": "Show export preview UI with acceptance criteria.",
+            "query": "Export preview UI",
+            "document_ids": document_id,
+            "max_chunks": "4",
+        },
         follow_redirects=False,
     )
     detail_location = create_response.headers["location"]

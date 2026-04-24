@@ -2,6 +2,15 @@ from io import BytesIO
 
 
 def _create_analysis_run(client):
+    project_response = client.post(
+        "/api/v1/projects",
+        json={
+            "name": "Export Project",
+            "source_type": "github",
+            "repository_url": "https://github.com/example/export-project",
+        },
+    )
+    project_id = project_response.json()["id"]
     upload_response = client.post(
         "/api/v1/documents/upload",
         data={"kind": "specification"},
@@ -22,7 +31,15 @@ def _create_analysis_run(client):
     document_id = upload_response.json()["id"]
     create_response = client.post(
         "/api/v1/analysis-runs",
-        json={"query": "Prepare Jira export", "document_ids": [document_id], "max_chunks": 4},
+        json={
+            "project_id": project_id,
+            "task_type": "technical_task",
+            "input_type": "text",
+            "input_text": "Prepare Jira export preview with explicit acceptance criteria.",
+            "query": "Prepare Jira export",
+            "document_ids": [document_id],
+            "max_chunks": 4,
+        },
     )
     return create_response.json()
 

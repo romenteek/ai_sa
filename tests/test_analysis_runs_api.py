@@ -1,7 +1,21 @@
 from io import BytesIO
 
 
+def create_project(client, name: str = "Billing Platform") -> str:
+    response = client.post(
+        "/api/v1/projects",
+        json={
+            "name": name,
+            "source_type": "github",
+            "repository_url": "https://github.com/example/billing",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
 def test_create_analysis_run_returns_strict_contract_and_persists_run(client) -> None:
+    project_id = create_project(client)
     upload_response = client.post(
         "/api/v1/documents/upload",
         data={"kind": "specification"},
@@ -24,6 +38,10 @@ def test_create_analysis_run_returns_strict_contract_and_persists_run(client) ->
     create_response = client.post(
         "/api/v1/analysis-runs",
         json={
+            "project_id": project_id,
+            "task_type": "feature",
+            "input_type": "text",
+            "input_text": "Build analysis run retrieval with grounded source references.",
             "query": "Implement analysis run retrieval",
             "document_ids": [document_id],
             "max_chunks": 5,
@@ -33,6 +51,9 @@ def test_create_analysis_run_returns_strict_contract_and_persists_run(client) ->
     assert create_response.status_code == 201
     body = create_response.json()
     assert body["status"] == "completed"
+    assert body["project_id"] == project_id
+    assert body["project_name"] == "Billing Platform"
+    assert body["task_type"] == "feature"
     assert body["review_status"] == "draft"
     assert body["reviewer_note"] == ""
     assert body["document_id"] == document_id
@@ -79,6 +100,7 @@ def test_create_analysis_run_returns_strict_contract_and_persists_run(client) ->
 
 
 def test_create_analysis_run_keeps_open_questions_when_context_is_insufficient(client) -> None:
+    project_id = create_project(client)
     upload_response = client.post(
         "/api/v1/documents/upload",
         data={"kind": "specification"},
@@ -89,6 +111,10 @@ def test_create_analysis_run_keeps_open_questions_when_context_is_insufficient(c
     response = client.post(
         "/api/v1/analysis-runs",
         json={
+            "project_id": project_id,
+            "task_type": "technical_task",
+            "input_type": "text",
+            "input_text": "Roll out tracing.",
             "query": "Distributed tracing rollout",
             "document_ids": [document_id],
             "max_chunks": 2,
@@ -97,12 +123,14 @@ def test_create_analysis_run_keeps_open_questions_when_context_is_insufficient(c
 
     assert response.status_code == 201
     body = response.json()
+    assert body["status"] == "needs_clarification"
+    assert body["clarification"]["clarifying_questions"]
     assert body["open_questions"]
     assert body["assumptions"]
-    assert body["qa_tasks"]
 
 
 def test_update_analysis_run_review_status_and_note(client) -> None:
+    project_id = create_project(client)
     upload_response = client.post(
         "/api/v1/documents/upload",
         data={"kind": "specification"},
@@ -118,7 +146,15 @@ def test_update_analysis_run_review_status_and_note(client) -> None:
 
     create_response = client.post(
         "/api/v1/analysis-runs",
-        json={"query": "Approval workflow", "document_ids": [document_id], "max_chunks": 3},
+        json={
+            "project_id": project_id,
+            "task_type": "feature",
+            "input_type": "text",
+            "input_text": "Add approval workflow with acceptance criteria and validation.",
+            "query": "Approval workflow",
+            "document_ids": [document_id],
+            "max_chunks": 3,
+        },
     )
     analysis_run_id = create_response.json()["id"]
 
