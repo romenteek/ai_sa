@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.schemas.analysis import AnalysisRunCreateRequest, AnalysisRunReviewUpdateRequest
+from app.schemas.export import JiraExportPreviewRequest, JiraExportRequest
 from app.services.analysis_runs import AnalysisRunService
+from app.services.exports import JiraExportError, JiraExportService
 from app.services.ingestion import IngestionService
 from app.ui.rendering import (
     render_analysis_run_detail,
@@ -14,6 +16,7 @@ from app.ui.rendering import (
     render_dashboard,
     render_document_detail,
     render_documents_page,
+    render_export_preview_page,
     render_new_analysis_page,
 )
 
@@ -118,6 +121,28 @@ def analysis_run_detail(
     return HTMLResponse(render_analysis_run_detail(run, success=success))
 
 
+@ui_router.get("/analysis-runs/{analysis_run_id}/export", response_class=HTMLResponse)
+def analysis_run_export_preview(
+    analysis_run_id: UUID,
+    project_key: str | None = Query(default=None),
+    issue_type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    service = JiraExportService(db)
+    try:
+        preview = service.build_preview(
+            JiraExportPreviewRequest(
+                analysis_run_id=analysis_run_id,
+                project_key=project_key,
+                issue_type=issue_type,
+            )
+        )
+    except JiraExportError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return HTMLResponse(render_export_preview_page(preview))
+
+
 @ui_router.post("/analysis-runs/{analysis_run_id}/review")
 def update_analysis_review_ui(
     analysis_run_id: UUID,
@@ -134,3 +159,37 @@ def update_analysis_review_ui(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis run not found")
     return RedirectResponse(url=f"/analysis-runs/{analysis_run_id}?updated=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@ui_router.post("/analysis-runs/{analysis_run_id}/export")
+def execute_export_ui(
+    analysis_run_id: UUID,
+    project_key: str = Form(default=""),
+    issue_type: str = Form(default=""),
+    confirm: str = Form(default=""),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    service = JiraExportService(db)
+    preview_request = JiraExportPreviewRequest(
+        analysis_run_id=analysis_run_id,
+        project_key=project_key or None,
+        issue_type=issue_type or None,
+    )
+    preview = service.build_preview(preview_request)
+
+    try:
+        result = service.execute_export(
+            JiraExportRequest(
+                analysis_run_id=analysis_run_id,
+                project_key=project_key or None,
+                issue_type=issue_type or None,
+                confirm=confirm.lower() == "true",
+            )
+        )
+    except JiraExportError as exc:
+        return HTMLResponse(
+            render_export_preview_page(preview, error=str(exc)),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return HTMLResponse(render_export_preview_page(preview, result=result))

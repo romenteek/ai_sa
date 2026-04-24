@@ -68,3 +68,50 @@ def test_analysis_run_detail_ui_supports_review_updates(client) -> None:
     assert "Review status updated." in review_response.text
     assert "approved" in review_response.text.lower()
     assert "Approved for manual Jira preparation once export is implemented." in review_response.text
+
+
+def test_export_preview_ui_shows_payload_and_dry_run_confirmation(client) -> None:
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        data={"kind": "specification"},
+        files={
+            "file": (
+                "export-ui.md",
+                BytesIO(
+                    b"""
+                    Jira exports should preserve assumptions, open questions, source references, and confidence.
+                    Review approval must happen before any export execution.
+                    """
+                ),
+                "text/markdown",
+            )
+        },
+    )
+    document_id = upload_response.json()["id"]
+
+    create_response = client.post(
+        "/analysis-runs",
+        data={"query": "Export preview UI", "document_ids": document_id, "max_chunks": "4"},
+        follow_redirects=False,
+    )
+    detail_location = create_response.headers["location"]
+
+    client.post(
+        f"{detail_location}/review",
+        data={"review_status": "approved", "reviewer_note": "Approved for export preview."},
+        follow_redirects=True,
+    )
+
+    preview_response = client.get(f"{detail_location}/export")
+    assert preview_response.status_code == 200
+    assert "Manual Jira Export" in preview_response.text
+    assert "Human-readable export payload" in preview_response.text
+    assert "Exact Jira payload preview" in preview_response.text
+
+    export_response = client.post(
+        f"{detail_location}/export",
+        data={"project_key": "AISA", "issue_type": "Task", "confirm": "true"},
+        follow_redirects=True,
+    )
+    assert export_response.status_code == 200
+    assert "dry-run preview mode" in export_response.text

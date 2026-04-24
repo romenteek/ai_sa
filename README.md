@@ -1,154 +1,196 @@
 # AI System Analyst MVP
 
-Internal service for ingesting specifications and architecture documents, retrieving grounded architecture context, and producing reviewable implementation tasks before any Jira export.
+Internal service for ingesting specifications and architecture documents, retrieving grounded architecture context, producing reviewable implementation tasks, and preparing explicitly gated Jira exports after human approval.
 
-## What works in Milestone 3
+## What works in Milestone 4
 
-- FastAPI backend scaffold
+- FastAPI backend scaffold with server-rendered internal UI
 - PostgreSQL + pgvector data model and Alembic migrations
 - Local file storage for uploaded documents
 - Text document ingestion with chunking and metadata
-- PostgreSQL-backed retrieval service with:
-  - document filtering by kind, explicit document IDs, and metadata
-  - chunk text search with deterministic ranking
-- Analysis run persistence in `analysis_runs`
-- Analysis run API endpoints:
-  - `POST /api/v1/analysis-runs`
-  - `GET /api/v1/analysis-runs`
-  - `GET /api/v1/analysis-runs/{analysis_run_id}`
-  - `PATCH /api/v1/analysis-runs/{analysis_run_id}/review`
-- Deterministic analysis output that returns the strict JSON contract and preserves:
+- PostgreSQL-backed retrieval with deterministic text ranking
+- Persisted analysis runs and persisted review workflow
+- Review statuses on analysis runs:
+  - `draft`
+  - `reviewed`
+  - `approved`
+  - `rejected`
+- Reviewer note storage on analysis runs
+- Deterministic structured analysis output that preserves:
   - `source_references`
   - task-level `source_refs`
   - confidence values
-  - explicit `open_questions` and `assumptions` when context is thin
-- Internal review UI pages for:
+  - explicit `open_questions`
+  - explicit `assumptions`
+- Internal UI pages for:
   - dashboard at `/`
   - document upload/list/detail at `/documents`
   - analysis creation at `/analysis-runs/new`
   - analysis run queue at `/analysis-runs`
   - full structured review page at `/analysis-runs/{analysis_run_id}`
-- Persisted review workflow fields on analysis runs:
-  - `draft`
-  - `reviewed`
-  - `approved`
-  - `rejected`
-- Reviewer note storage for review decisions
-- Jira export stub endpoint that is disabled by default
-- Targeted tests for retrieval, upload, analysis APIs, review status updates, and key UI routes
+  - Jira export preview at `/analysis-runs/{analysis_run_id}/export`
+- Manual Jira export flow with explicit preview and confirmation
+- Approval-gated export behavior:
+  - non-approved runs can be previewed but cannot be exported
+  - only approved runs can proceed to export confirmation
+- Dry-run/manual-preview export mode when Jira is not fully configured
+
+## Export behavior in this milestone
+
+- `POST /api/v1/exports/jira/preview` builds the Jira-ready payload preview
+- `POST /api/v1/exports/jira` requires explicit `confirm=true`
+- Export preview shows:
+  - project key
+  - issue type
+  - summary
+  - description
+  - acceptance criteria
+  - assumptions
+  - open questions
+  - source references
+  - confidence
+  - review status
+  - reviewer note
+- If Jira is not fully configured, confirmation returns a dry-run result instead of writing externally
+- Live Jira writes are attempted only when all of these are configured:
+  - `JIRA_EXPORT_ENABLED=true`
+  - `JIRA_BASE_URL`
+  - `JIRA_USER_EMAIL`
+  - `JIRA_API_TOKEN`
 
 ## Still pending or intentionally stubbed
 
-- Extraction currently supports plain text style files (`.txt`, `.md`)
+- Extraction currently supports only `.txt` and `.md`
 - Embedding generation is not wired yet, so pgvector similarity remains inactive scaffolding
-- Retrieval currently uses deterministic text ranking rather than embedding similarity
-- Analysis generation is deterministic and rule-based for now; no heavy LLM integration is active
-- Jira export remains a manual approval stub only
-- Jira export does not use review status yet; approval is captured for human review only
-- PDF and DOCX ingestion are intentionally out of scope for this milestone
+- Retrieval still uses deterministic text ranking rather than embeddings
+- Analysis generation remains deterministic and rule-based
+- Automatic Jira creation is intentionally not implemented
+- PDF and DOCX ingestion remain out of scope
 
-## Local run
+## Canonical local run
+
+Canonical browser URL:
+- `http://127.0.0.1:8000`
+
+Recommended start path:
 
 1. Copy `.env.example` to `.env`
-2. Start services:
+2. Start everything:
 
 ```bash
 docker compose up --build
 ```
 
-3. Run migrations in another shell:
+3. Open:
 
-```bash
-docker compose exec api alembic upgrade head
+```text
+http://127.0.0.1:8000
 ```
 
-4. Open the API docs at `http://localhost:8000/docs`
-5. Open the internal review UI at `http://localhost:8000/`
+Notes:
+- The `api` container now runs `alembic upgrade head` before starting Uvicorn
+- You do not need a separate migration command for the normal Docker flow
+- Docker uses the `.env` example defaults, including `APP_HOST=0.0.0.0`
 
-## Main flow now
+## Local Python run path
 
-1. Upload a document with `POST /api/v1/documents/upload`
-2. Inspect stored documents with `GET /api/v1/documents` or `/documents`
-3. Start an analysis run with `POST /api/v1/analysis-runs` or `/analysis-runs`
-4. Review stored runs with `GET /api/v1/analysis-runs`, `GET /api/v1/analysis-runs/{analysis_run_id}`, or `/analysis-runs/{analysis_run_id}`
-5. Update review state with `PATCH /api/v1/analysis-runs/{analysis_run_id}/review` or the review form in the UI
-6. See Jira export safety stub with `POST /api/v1/exports/jira`
+Use this when you already have a reachable PostgreSQL database and want to run without Docker.
 
-## Review actions supported
-
-- Mark an analysis run as `draft`, `reviewed`, `approved`, or `rejected`
-- Store a short reviewer note with the decision
-- Inspect the full structured output in one page, including:
-  - `feature_summary`
-  - `affected_components`
-  - each generated task section
-  - `risks`
-  - `open_questions`
-  - `assumptions`
-  - `source_references`
-  - confidence values
-
-## What is still pending before Jira export is useful
-
-- Review status is persisted, but there is still no real Jira export implementation
-- Automatic Jira creation is intentionally not implemented
-- Export payload shaping against a real Jira project is still pending
-- PDF and DOCX ingestion are still out of scope
-- Embedding generation and pgvector similarity are still not active
-
-### Example analysis request
-
-```json
-{
-  "query": "Implement retrieval-backed analysis runs",
-  "document_ids": ["<document-uuid>"],
-  "document_kind": "specification",
-  "metadata_filters": {
-    "extension": ".md"
-  },
-  "max_chunks": 6
-}
-```
-
-### Analysis response notes
-
-- The response includes the required analysis contract fields at the top level:
-  - `feature_summary`
-  - `affected_components`
-  - `backend_tasks`
-  - `frontend_tasks`
-  - `integration_tasks`
-  - `db_changes`
-  - `qa_tasks`
-  - `observability_tasks`
-  - `risks`
-  - `open_questions`
-  - `assumptions`
-  - `source_references`
-  - `confidence`
-- Run metadata such as `id`, `status`, `document_id`, `request_payload`, `validation_notes`, and `created_at` is returned alongside the contract.
-
-## Local development without Docker
-
-1. Create a virtual environment
-2. Install dependencies:
+1. Install dependencies:
 
 ```bash
 pip install -e .[dev]
 ```
 
-3. Set environment variables from `.env.example`
-4. Run the API:
+2. Set environment variables:
 
-```bash
-uvicorn app.main:app --reload
+- `DATABASE_URL` should point to your local PostgreSQL instance, for example:
+
+```text
+postgresql+psycopg://postgres:postgres@localhost:5432/ai_sa
 ```
 
-5. Run tests:
+- Set a browser-friendly host:
+
+```text
+APP_HOST=127.0.0.1
+APP_PORT=8000
+```
+
+3. Run migrations:
 
 ```bash
-pytest
+alembic upgrade head
 ```
+
+4. Start the app:
+
+```bash
+python scripts/run_local.py
+```
+
+5. Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+## Main UI flow
+
+1. Upload a document in `/documents`
+2. Start an analysis run in `/analysis-runs/new`
+3. Review the full structured result in `/analysis-runs/{analysis_run_id}`
+4. Update review status and reviewer note
+5. Open the Jira export preview from the analysis run detail page
+6. Confirm the export explicitly
+7. If Jira is not fully configured, inspect the dry-run payload and use it manually
+
+## Main API flow
+
+1. Upload a document with `POST /api/v1/documents/upload`
+2. Start an analysis run with `POST /api/v1/analysis-runs`
+3. Review or update approval state with `PATCH /api/v1/analysis-runs/{analysis_run_id}/review`
+4. Build the export preview with `POST /api/v1/exports/jira/preview`
+5. Confirm the export with `POST /api/v1/exports/jira`
+
+### Example Jira preview request
+
+```json
+{
+  "analysis_run_id": "<analysis-run-uuid>",
+  "project_key": "AISA",
+  "issue_type": "Task"
+}
+```
+
+### Example Jira export confirmation request
+
+```json
+{
+  "analysis_run_id": "<analysis-run-uuid>",
+  "project_key": "AISA",
+  "issue_type": "Task",
+  "confirm": true
+}
+```
+
+## Environment variables
+
+- `APP_NAME`
+- `APP_ENV`
+- `APP_DEBUG`
+- `APP_HOST`
+- `APP_PORT`
+- `DATABASE_URL`
+- `STORAGE_DIR`
+- `MAX_CHUNK_SIZE`
+- `CHUNK_OVERLAP`
+- `JIRA_EXPORT_ENABLED`
+- `JIRA_BASE_URL`
+- `JIRA_USER_EMAIL`
+- `JIRA_API_TOKEN`
+- `JIRA_PROJECT_KEY`
+- `JIRA_ISSUE_TYPE`
 
 ## Alternative local verification
 
@@ -159,23 +201,14 @@ python -m pip install --upgrade pip
 New-Item -ItemType Directory -Force .tmp, .pytest-packages | Out-Null
 $env:TEMP = (Resolve-Path .tmp)
 $env:TMP = (Resolve-Path .tmp)
-python -m pip install --target .pytest-packages pytest
+python -m pip install --target .pytest-packages -e .[dev]
 $env:PYTHONPATH = "$(Resolve-Path .pytest-packages);$(Get-Location)"
-python -c "from _pytest.config import console_main; raise SystemExit(console_main())" tests
+python -c "import pytest; raise SystemExit(pytest.main(['tests']))"
 ```
 
-This keeps the existing `app/` layout intact while avoiding user-site and broken virtualenv issues that showed up in this environment.
+## Retrieval, review, and export notes
 
-## VPS notes
-
-- Install Docker Engine and Docker Compose plugin
-- Copy `.env.example` to `.env` and update secrets
-- Run `docker compose up --build -d`
-- Run `docker compose exec api alembic upgrade head`
-- Mount a persistent volume for `./storage`
-
-## Retrieval and analysis notes
-
-- Retrieval is database-backed and works today with document metadata filters plus deterministic text ranking.
-- pgvector remains part of the schema, but vector search is explicitly disabled until embedding generation is implemented safely.
-- Analysis outputs are grounded only in retrieved chunk text and always keep explicit source references.
+- Retrieval is database-backed and grounded only in stored chunk text
+- Source references and confidence are preserved through review and export preview
+- Export preview is intentionally human-readable before any confirmation step
+- Export confirmation stays dry-run until Jira credentials and enablement are configured explicitly

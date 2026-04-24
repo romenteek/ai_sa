@@ -1,9 +1,9 @@
 from datetime import datetime
 from html import escape
-from uuid import UUID
 
 from app.schemas.analysis import AnalysisRunListItem, AnalysisRunResponse, GeneratedTaskPayload, SourceReference
 from app.schemas.document import DocumentDetail, DocumentListItem
+from app.schemas.export import JiraExportPreviewResponse, JiraExportResponse
 
 
 TASK_SECTIONS = (
@@ -32,14 +32,14 @@ def render_page(*, title: str, current_path: str, content: str) -> str:
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{escape(title)} · AI System Analyst</title>
+    <title>{escape(title)} - AI System Analyst</title>
     <link rel="stylesheet" href="/static/internal.css">
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
         <h1>AI System Analyst</h1>
-        <p class="sidebar-copy">Internal review flow for grounded ingestion and deterministic analysis runs.</p>
+        <p class="sidebar-copy">Internal review flow for grounded ingestion, structured review, and explicit Jira export preview.</p>
         <nav class="nav">{navigation}</nav>
       </aside>
       <main class="content">{content}</main>
@@ -64,15 +64,15 @@ def render_dashboard(documents: list[DocumentListItem], runs: list[AnalysisRunLi
         content=f"""
         <header class="page-header">
           <div>
-            <p class="eyebrow">Milestone 3</p>
+            <p class="eyebrow">Milestone 4</p>
             <h2>Internal Review Dashboard</h2>
-            <p class="lead">Upload grounded source docs, create deterministic analysis runs, and capture review decisions before Jira export becomes useful.</p>
+            <p class="lead">Upload grounded source docs, review deterministic analysis runs, and explicitly preview Jira export before any manual confirmation.</p>
           </div>
         </header>
         <section class="stats-grid">
           {_stat_card("Documents", str(len(documents)), "Uploaded `.txt` and `.md` sources")}
           {_stat_card("Analysis Runs", str(len(runs)), "Persisted structured outputs")}
-          {_stat_card("Approved", str(approved_count), "Runs ready for a later manual export step")}
+          {_stat_card("Approved", str(approved_count), "Runs eligible for export preview confirmation")}
         </section>
         <section class="grid two-up">
           <article class="panel">
@@ -295,8 +295,9 @@ def render_analysis_run_detail(
           <div>
             <p class="eyebrow">Analysis Run</p>
             <h2>{escape(run.feature_summary)}</h2>
-            <p class="lead">Run status: <strong>{escape(run.status)}</strong> · Review status: {_review_badge(run.review_status)} · Confidence: {run.confidence:.2f}</p>
+            <p class="lead">Run status: <strong>{escape(run.status)}</strong> - Review status: {_review_badge(run.review_status)} - Confidence: {run.confidence:.2f}</p>
           </div>
+          <a class="button-link" href="/analysis-runs/{run.id}/export">Preview Jira export</a>
         </header>
         {_flash(error, tone='error') if error else ''}
         {_flash(success, tone='success') if success else ''}
@@ -332,6 +333,83 @@ def render_analysis_run_detail(
         <section class="panel">
           <div class="panel-header"><h3>Generated task sections</h3></div>
           <div class="stack">{task_sections}</div>
+        </section>
+        """,
+    )
+
+
+def render_export_preview_page(
+    preview: JiraExportPreviewResponse,
+    *,
+    result: JiraExportResponse | None = None,
+    error: str | None = None,
+) -> str:
+    payload = preview.payload
+    success = result.message if result else None
+    confirmation_copy = (
+        "Confirm export to Jira"
+        if preview.export_mode == "live" and preview.export_allowed
+        else "Confirm dry-run export"
+    )
+    return render_page(
+        title="Jira Export Preview",
+        current_path="/analysis-runs",
+        content=f"""
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Manual Jira Export</p>
+            <h2>{escape(payload.summary)}</h2>
+            <p class="lead">Export mode: <strong>{escape(preview.export_mode)}</strong> - Review status: {_review_badge(payload.review_status)} - Confidence: {payload.confidence:.2f}</p>
+          </div>
+          <a class="button-link" href="/analysis-runs/{preview.analysis_run_id}">Back to analysis run</a>
+        </header>
+        {_flash(error, tone='error') if error else ''}
+        {_flash(success, tone='success') if success else ''}
+        <section class="grid detail-layout">
+          <article class="panel">
+            <div class="panel-header"><h3>Preview controls</h3></div>
+            <form method="get" action="/analysis-runs/{preview.analysis_run_id}/export" class="stack-form">
+              <label>Project key
+                <input type="text" name="project_key" value="{escape(payload.project_key)}" required>
+              </label>
+              <label>Issue type
+                <input type="text" name="issue_type" value="{escape(payload.issue_type)}" required>
+              </label>
+              <button type="submit">Refresh preview</button>
+            </form>
+            <hr>
+            <p>{escape(preview.message)}</p>
+            {_render_string_list("Missing live configuration", preview.missing_configuration)}
+            <form method="post" action="/analysis-runs/{preview.analysis_run_id}/export" class="stack-form">
+              <input type="hidden" name="project_key" value="{escape(payload.project_key)}">
+              <input type="hidden" name="issue_type" value="{escape(payload.issue_type)}">
+              <label class="checkbox-row">
+                <input type="checkbox" name="confirm" value="true" required>
+                <span>I explicitly confirm this manual export action.</span>
+              </label>
+              <button type="submit" {"disabled" if not preview.export_allowed else ""}>{confirmation_copy}</button>
+            </form>
+          </article>
+          <article class="panel">
+            <div class="panel-header"><h3>Human-readable export payload</h3></div>
+            <dl class="meta-grid">
+              <dt>Project</dt><dd>{escape(payload.project_key)}</dd>
+              <dt>Issue type</dt><dd>{escape(payload.issue_type)}</dd>
+              <dt>Review status</dt><dd>{escape(payload.review_status)}</dd>
+              <dt>Reviewer note</dt><dd>{escape(payload.reviewer_note or "None")}</dd>
+            </dl>
+            <h4>Description</h4>
+            <pre>{escape(payload.description)}</pre>
+            {_render_string_list("Acceptance criteria", payload.acceptance_criteria)}
+            {_render_string_list("Assumptions", payload.assumptions)}
+            {_render_string_list("Open questions", payload.open_questions)}
+            {_render_source_refs("Source references", payload.source_references)}
+          </article>
+        </section>
+        <section class="panel">
+          <div class="panel-header"><h3>Exact Jira payload preview</h3></div>
+          <pre>{escape(str(preview.jira_payload))}</pre>
+          {f"<p><strong>Issue URL:</strong> <a class='text-link' href='{escape(result.issue_url)}'>{escape(result.issue_url)}</a></p>" if result and result.issue_url else ""}
         </section>
         """,
     )
