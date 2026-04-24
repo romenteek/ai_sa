@@ -4,6 +4,7 @@ from html import escape
 from app.schemas.analysis import AnalysisRunListItem, AnalysisRunResponse, GeneratedTaskPayload, SourceReference
 from app.schemas.document import DocumentDetail, DocumentListItem
 from app.schemas.export import JiraExportPreviewResponse, JiraExportResponse
+from app.schemas.project import ProjectListItem, ProjectResponse
 
 
 TASK_SECTIONS = (
@@ -20,10 +21,11 @@ def render_page(*, title: str, current_path: str, content: str) -> str:
     navigation = "".join(
         _nav_link(label, href, current_path == href)
         for label, href in (
-            ("Dashboard", "/"),
-            ("Documents", "/documents"),
+            ("Projects", "/projects"),
             ("New Analysis", "/analysis-runs/new"),
-            ("Analysis Runs", "/analysis-runs"),
+            ("Clarifications", "/clarifications"),
+            ("Results", "/results"),
+            ("Documents", "/documents"),
             ("API Docs", "/docs"),
         )
     )
@@ -64,9 +66,9 @@ def render_dashboard(documents: list[DocumentListItem], runs: list[AnalysisRunLi
         content=f"""
         <header class="page-header">
           <div>
-            <p class="eyebrow">Milestone 4</p>
+            <p class="eyebrow">Milestone 5</p>
             <h2>Internal Review Dashboard</h2>
-            <p class="lead">Upload grounded source docs, review deterministic analysis runs, and explicitly preview Jira export before any manual confirmation.</p>
+            <p class="lead">Project-aware analysis now starts with clarification when the request lacks enough grounded information for final output.</p>
           </div>
         </header>
         <section class="stats-grid">
@@ -88,6 +90,97 @@ def render_dashboard(documents: list[DocumentListItem], runs: list[AnalysisRunLi
               <a class="text-link" href="/analysis-runs">See all runs</a>
             </div>
             <ul class="link-list">{recent_runs}</ul>
+          </article>
+        </section>
+        """,
+    )
+
+
+def render_projects_page(projects: list[ProjectListItem], *, error: str | None = None) -> str:
+    rows = "".join(
+        f"""
+        <tr>
+          <td><a href="/projects/{project.id}">{escape(project.name)}</a></td>
+          <td>{escape(project.source_type)}</td>
+          <td>{escape(project.ingestion_status)}</td>
+          <td>{project.analysis_count}</td>
+          <td>{_format_dt(project.created_at)}</td>
+        </tr>
+        """
+        for project in projects
+    ) or "<tr><td colspan='5' class='empty'>No projects yet.</td></tr>"
+    return render_page(
+        title="Projects",
+        current_path="/projects",
+        content=f"""
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">Projects</p>
+            <h2>Project Sources</h2>
+          </div>
+        </header>
+        {_flash(error, tone='error') if error else ''}
+        <section class="grid two-up">
+          <article class="panel">
+            <div class="panel-header"><h3>Create project</h3></div>
+            <form method="post" action="/projects" enctype="multipart/form-data" class="stack-form">
+              <label>Name<input type="text" name="name" required></label>
+              <label>Description<textarea name="description" rows="3"></textarea></label>
+              <label>Source type
+                <select name="source_type" required>
+                  <option value="github">GitHub</option>
+                  <option value="archive">Uploaded archive</option>
+                </select>
+              </label>
+              <label>Repository URL<input type="url" name="repository_url" placeholder="https://github.com/org/repo"></label>
+              <label>Archive file<input type="file" name="archive" accept=".zip,.tar,.gz,.tgz"></label>
+              <button type="submit">Create project</button>
+            </form>
+          </article>
+          <article class="panel">
+            <div class="panel-header"><h3>Stored projects</h3></div>
+            <table>
+              <thead><tr><th>Name</th><th>Source</th><th>Ingestion</th><th>Analyses</th><th>Created</th></tr></thead>
+              <tbody>{rows}</tbody>
+            </table>
+          </article>
+        </section>
+        """,
+    )
+
+
+def render_project_detail(project: ProjectResponse, runs: list[AnalysisRunListItem]) -> str:
+    project_runs = "".join(
+        f"<li><a href='/analysis-runs/{run.id}'>{escape(run.feature_summary)}</a><span>{escape(run.status)} - {escape(run.task_type)}</span></li>"
+        for run in runs
+        if run.project_id == project.id
+    ) or "<li class='empty'>No analysis requests for this project yet.</li>"
+    source = project.repository_url or project.archive_reference or "n/a"
+    return render_page(
+        title=project.name,
+        current_path="/projects",
+        content=f"""
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">{escape(project.source_type)}</p>
+            <h2>{escape(project.name)}</h2>
+            <p class="lead">{escape(project.description or project.ingestion_note)}</p>
+          </div>
+          <a class="button-link" href="/analysis-runs/new?project_id={project.id}">New analysis</a>
+        </header>
+        <section class="grid two-up">
+          <article class="panel">
+            <div class="panel-header"><h3>Source</h3></div>
+            <dl class="meta-grid">
+              <dt>Reference</dt><dd><code>{escape(source)}</code></dd>
+              <dt>Ingestion</dt><dd>{escape(project.ingestion_status)}</dd>
+              <dt>Boundary</dt><dd>{escape(project.ingestion_note)}</dd>
+              <dt>Created</dt><dd>{_format_dt(project.created_at)}</dd>
+            </dl>
+          </article>
+          <article class="panel">
+            <div class="panel-header"><h3>Analysis requests</h3></div>
+            <ul class="link-list">{project_runs}</ul>
           </article>
         </section>
         """,
@@ -192,10 +285,16 @@ def render_document_detail(document: DocumentDetail, runs: list[AnalysisRunListI
 
 def render_new_analysis_page(
     documents: list[DocumentListItem],
+    projects: list[ProjectListItem],
     *,
     error: str | None = None,
     selected_document_id: str | None = None,
+    selected_project_id: str | None = None,
 ) -> str:
+    project_options = "".join(
+        f"<option value='{project.id}' {'selected' if str(project.id) == selected_project_id else ''}>{escape(project.name)}</option>"
+        for project in projects
+    )
     document_options = "".join(
         f"""
         <label class="checkbox-row">
@@ -218,7 +317,28 @@ def render_new_analysis_page(
         </header>
         {_flash(error, tone='error') if error else ''}
         <section class="panel">
-          <form method="post" action="/analysis-runs" class="stack-form">
+          <form method="post" action="/analysis-runs" enctype="multipart/form-data" class="stack-form">
+            <label>Project
+              <select name="project_id" required>
+                <option value="">Select a project</option>
+                {project_options}
+              </select>
+            </label>
+            <label>Task type
+              <select name="task_type" required>
+                <option value="feature">Feature</option>
+                <option value="enhancement">Enhancement/change</option>
+                <option value="bug">Bug</option>
+                <option value="technical_task">Technical task</option>
+                <option value="spike">Spike/research</option>
+              </select>
+            </label>
+            <label>Initial input
+              <textarea name="input_text" rows="4" placeholder="Describe the request, bug, change, or research question."></textarea>
+            </label>
+            <label>Initial input file
+              <input type="file" name="input_file">
+            </label>
             <label>Query
               <textarea name="query" rows="4" required>Summarize the implementation work required by the selected documents.</textarea>
             </label>
@@ -240,10 +360,31 @@ def render_new_analysis_page(
 
 
 def render_analysis_runs_page(runs: list[AnalysisRunListItem]) -> str:
+    return _render_analysis_table_page(
+        runs,
+        title="Analysis Runs",
+        eyebrow="Review Queue",
+        current_path="/analysis-runs",
+        cta_label="Create run",
+        cta_href="/analysis-runs/new",
+    )
+
+
+def _render_analysis_table_page(
+    runs: list[AnalysisRunListItem],
+    *,
+    title: str,
+    eyebrow: str,
+    current_path: str,
+    cta_label: str | None = None,
+    cta_href: str | None = None,
+) -> str:
     rows = "".join(
         f"""
         <tr>
           <td><a href="/analysis-runs/{run.id}">{escape(run.feature_summary)}</a></td>
+          <td>{escape(run.project_name or "n/a")}</td>
+          <td>{escape(run.task_type)}</td>
           <td>{escape(run.status)}</td>
           <td>{_review_badge(run.review_status)}</td>
           <td>{run.confidence:.2f}</td>
@@ -251,25 +392,45 @@ def render_analysis_runs_page(runs: list[AnalysisRunListItem]) -> str:
         </tr>
         """
         for run in runs
-    ) or "<tr><td colspan='5' class='empty'>No analysis runs yet.</td></tr>"
+    ) or "<tr><td colspan='7' class='empty'>No analysis runs yet.</td></tr>"
+    cta = f'<a class="button-link" href="{cta_href}">{escape(cta_label or "")}</a>' if cta_href and cta_label else ""
     return render_page(
-        title="Analysis Runs",
-        current_path="/analysis-runs",
+        title=title,
+        current_path=current_path,
         content=f"""
         <header class="page-header">
           <div>
-            <p class="eyebrow">Review Queue</p>
-            <h2>Analysis Runs</h2>
+            <p class="eyebrow">{escape(eyebrow)}</p>
+            <h2>{escape(title)}</h2>
           </div>
-          <a class="button-link" href="/analysis-runs/new">Create run</a>
+          {cta}
         </header>
         <section class="panel">
           <table>
-            <thead><tr><th>Summary</th><th>Run status</th><th>Review status</th><th>Confidence</th><th>Created</th></tr></thead>
+            <thead><tr><th>Summary</th><th>Project</th><th>Task type</th><th>Run status</th><th>Review status</th><th>Confidence</th><th>Created</th></tr></thead>
             <tbody>{rows}</tbody>
           </table>
         </section>
         """,
+    )
+
+
+def render_clarifications_page(runs: list[AnalysisRunListItem]) -> str:
+    pending = [run for run in runs if run.status in {"needs_clarification", "clarification_answered"}]
+    return _render_analysis_table_page(
+        pending,
+        title="Clarifications",
+        eyebrow="Clarification Queue",
+        current_path="/clarifications",
+    )
+
+
+def render_results_page(runs: list[AnalysisRunListItem]) -> str:
+    return _render_analysis_table_page(
+        runs,
+        title="Results",
+        eyebrow="Final Outputs",
+        current_path="/results",
     )
 
 
@@ -297,7 +458,7 @@ def render_analysis_run_detail(
             <h2>{escape(run.feature_summary)}</h2>
             <p class="lead">Run status: <strong>{escape(run.status)}</strong> - Review status: {_review_badge(run.review_status)} - Confidence: {run.confidence:.2f}</p>
           </div>
-          <a class="button-link" href="/analysis-runs/{run.id}/export">Preview Jira export</a>
+          {f'<a class="button-link" href="/analysis-runs/{run.id}/export">Preview Jira export</a>' if run.status == "completed" else ''}
         </header>
         {_flash(error, tone='error') if error else ''}
         {_flash(success, tone='success') if success else ''}
@@ -317,6 +478,8 @@ def render_analysis_run_detail(
             <p>{escape(run.validation_notes)}</p>
             <dl class="meta-grid">
               <dt>Run ID</dt><dd><code>{run.id}</code></dd>
+              <dt>Project</dt><dd>{escape(run.project_name or "n/a")}</dd>
+              <dt>Task type</dt><dd>{escape(run.task_type)}</dd>
               <dt>Document ID</dt><dd><code>{run.document_id or "n/a"}</code></dd>
               <dt>Created</dt><dd>{_format_dt(run.created_at)}</dd>
             </dl>
@@ -330,12 +493,60 @@ def render_analysis_run_detail(
             {_render_source_refs("Source references", run.source_references)}
           </article>
         </section>
+        {_render_clarification_block(run)}
         <section class="panel">
           <div class="panel-header"><h3>Generated task sections</h3></div>
           <div class="stack">{task_sections}</div>
         </section>
         """,
     )
+
+
+def _render_clarification_block(run: AnalysisRunResponse) -> str:
+    if not run.clarification:
+        return ""
+    questions = _render_string_list("Clarifying questions", run.clarification.clarifying_questions)
+    missing = _render_string_list("Missing information", run.clarification.missing_information)
+    assumptions = _render_string_list("Preliminary assumptions", run.clarification.preliminary_assumptions)
+    rounds = "".join(
+        f"""
+        <article class="subpanel">
+          <h4>Round {round_.round_index}</h4>
+          {_render_string_list("AI questions", round_.questions)}
+          <p><strong>User answer:</strong> {escape(round_.answers or "Pending")}</p>
+        </article>
+        """
+        for round_ in run.clarification_rounds
+    )
+    pending_form = ""
+    if run.status == "needs_clarification":
+        pending_form = f"""
+        <form method="post" action="/analysis-runs/{run.id}/clarifications" class="stack-form">
+          <label>Your clarification answer
+            <textarea name="answers" rows="5" required></textarea>
+          </label>
+          <button type="submit">Submit clarification</button>
+        </form>
+        """
+    return f"""
+    <section class="grid two-up">
+      <article class="panel">
+        <div class="panel-header"><h3>Current understanding</h3></div>
+        <p>{escape(run.clarification.request_summary)}</p>
+        {_render_string_list("Understood scope", run.clarification.understood_scope)}
+        {_render_string_list("Preliminary affected components", run.clarification.suspected_affected_components)}
+        {missing}
+        {questions}
+        {assumptions}
+        <p><strong>Clarification confidence:</strong> {run.clarification.confidence:.2f}</p>
+      </article>
+      <article class="panel">
+        <div class="panel-header"><h3>Clarification rounds</h3></div>
+        <div class="stack">{rounds or "<p class='empty'>No clarification rounds.</p>"}</div>
+        {pending_form}
+      </article>
+    </section>
+    """
 
 
 def render_export_preview_page(

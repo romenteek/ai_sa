@@ -7,17 +7,24 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.schemas.analysis import AnalysisRunCreateRequest, AnalysisRunReviewUpdateRequest
 from app.schemas.export import JiraExportPreviewRequest, JiraExportRequest
+from app.schemas.project import ProjectCreateRequest
 from app.services.analysis_runs import AnalysisRunService
 from app.services.exports import JiraExportError, JiraExportService
 from app.services.ingestion import IngestionService
+from app.services.projects import ProjectService
+from app.services.storage import LocalStorage
 from app.ui.rendering import (
     render_analysis_run_detail,
     render_analysis_runs_page,
+    render_clarifications_page,
     render_dashboard,
     render_document_detail,
     render_documents_page,
     render_export_preview_page,
     render_new_analysis_page,
+    render_project_detail,
+    render_projects_page,
+    render_results_page,
 )
 
 
@@ -29,6 +36,46 @@ def dashboard(db: Session = Depends(get_db)) -> HTMLResponse:
     documents = IngestionService(db).list_documents()
     runs = AnalysisRunService(db).list_runs()
     return HTMLResponse(render_dashboard(documents, runs))
+
+
+@ui_router.get("/projects", response_class=HTMLResponse)
+def projects_page(db: Session = Depends(get_db)) -> HTMLResponse:
+    projects = ProjectService(db).list_projects()
+    return HTMLResponse(render_projects_page(projects))
+
+
+@ui_router.post("/projects")
+async def create_project_ui(
+    name: str = Form(...),
+    description: str = Form(default=""),
+    source_type: str = Form(...),
+    repository_url: str = Form(default=""),
+    archive: UploadFile | None = File(default=None),
+    db: Session = Depends(get_db),
+) -> Response:
+    service = ProjectService(db)
+    payload = ProjectCreateRequest(
+        name=name,
+        description=description,
+        source_type=source_type,
+        repository_url=repository_url or None,
+    )
+    try:
+        project = await service.create_project(payload, archive=archive if archive and archive.filename else None)
+    except ValueError as exc:
+        projects = service.list_projects()
+        return HTMLResponse(render_projects_page(projects, error=str(exc)), status_code=status.HTTP_400_BAD_REQUEST)
+    return RedirectResponse(url=f"/projects/{project.id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@ui_router.get("/projects/{project_id}", response_class=HTMLResponse)
+def project_detail(project_id: UUID, db: Session = Depends(get_db)) -> HTMLResponse:
+    project_service = ProjectService(db)
+    project = project_service.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    runs = AnalysisRunService(db).list_runs()
+    return HTMLResponse(render_project_detail(project, runs))
 
 
 @ui_router.get("/documents", response_class=HTMLResponse)
@@ -66,19 +113,27 @@ def document_detail(document_id: UUID, db: Session = Depends(get_db)) -> HTMLRes
 @ui_router.get("/analysis-runs/new", response_class=HTMLResponse)
 def new_analysis_page(
     document_id: UUID | None = Query(default=None),
+    project_id: UUID | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     documents = IngestionService(db).list_documents()
+    projects = ProjectService(db).list_projects()
     return HTMLResponse(
         render_new_analysis_page(
             documents,
+            projects,
             selected_document_id=str(document_id) if document_id else None,
+            selected_project_id=str(project_id) if project_id else None,
         )
     )
 
 
 @ui_router.post("/analysis-runs")
-def create_analysis_run_ui(
+async def create_analysis_run_ui(
+    project_id: UUID = Form(...),
+    task_type: str = Form(...),
+    input_text: str = Form(default=""),
+    input_file: UploadFile | None = File(default=None),
     query: str = Form(...),
     document_ids: list[UUID] = Form(default_factory=list),
     document_kind: str = Form(default=""),
@@ -86,7 +141,19 @@ def create_analysis_run_ui(
     db: Session = Depends(get_db),
 ) -> Response:
     documents = IngestionService(db).list_documents()
+    projects = ProjectService(db).list_projects()
+    input_file_reference = None
+    input_type = "text"
+    if input_file is not None and input_file.filename:
+        storage_path, _ = await LocalStorage().save_upload(input_file, subdir="analysis-inputs")
+        input_file_reference = str(storage_path)
+        input_type = "file"
     payload = AnalysisRunCreateRequest(
+        project_id=project_id,
+        task_type=task_type,
+        input_type=input_type,
+        input_text=input_text,
+        input_file_reference=input_file_reference,
         query=query,
         document_ids=document_ids,
         document_kind=document_kind or None,
@@ -96,7 +163,7 @@ def create_analysis_run_ui(
         run = AnalysisRunService(db).create_run(payload)
     except ValueError as exc:
         return HTMLResponse(
-            render_new_analysis_page(documents, error=str(exc)),
+            render_new_analysis_page(documents, projects, error=str(exc), selected_project_id=str(project_id)),
             status_code=status.HTTP_400_BAD_REQUEST,
         )
     return RedirectResponse(url=f"/analysis-runs/{run.id}", status_code=status.HTTP_303_SEE_OTHER)
@@ -106,6 +173,18 @@ def create_analysis_run_ui(
 def analysis_runs_page(db: Session = Depends(get_db)) -> HTMLResponse:
     runs = AnalysisRunService(db).list_runs()
     return HTMLResponse(render_analysis_runs_page(runs))
+
+
+@ui_router.get("/clarifications", response_class=HTMLResponse)
+def clarifications_page(db: Session = Depends(get_db)) -> HTMLResponse:
+    runs = AnalysisRunService(db).list_runs()
+    return HTMLResponse(render_clarifications_page(runs))
+
+
+@ui_router.get("/results", response_class=HTMLResponse)
+def results_page(db: Session = Depends(get_db)) -> HTMLResponse:
+    runs = AnalysisRunService(db).list_results()
+    return HTMLResponse(render_results_page(runs))
 
 
 @ui_router.get("/analysis-runs/{analysis_run_id}", response_class=HTMLResponse)
@@ -119,6 +198,23 @@ def analysis_run_detail(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis run not found")
     success = "Review status updated." if updated == "1" else None
     return HTMLResponse(render_analysis_run_detail(run, success=success))
+
+
+@ui_router.post("/analysis-runs/{analysis_run_id}/clarifications")
+def answer_clarification_ui(
+    analysis_run_id: UUID,
+    answers: str = Form(...),
+    db: Session = Depends(get_db),
+) -> Response:
+    from app.schemas.analysis import ClarificationAnswerRequest
+
+    run = AnalysisRunService(db).answer_clarification(
+        analysis_run_id,
+        ClarificationAnswerRequest(answers=answers),
+    )
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis run not found")
+    return RedirectResponse(url=f"/analysis-runs/{analysis_run_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @ui_router.get("/analysis-runs/{analysis_run_id}/export", response_class=HTMLResponse)
