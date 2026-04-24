@@ -2,14 +2,24 @@
 
 Internal service for ingesting specifications and architecture documents, retrieving grounded architecture context, producing reviewable implementation tasks, and preparing explicitly gated Jira exports after human approval.
 
-## What works in Milestone 4
+## What works in Milestone 5
 
 - FastAPI backend scaffold with server-rendered internal UI
 - PostgreSQL + pgvector data model and Alembic migrations
 - Local file storage for uploaded documents
+- Project records with source type, repository URL, or uploaded archive reference
 - Text document ingestion with chunking and metadata
 - PostgreSQL-backed retrieval with deterministic text ranking
-- Persisted analysis runs and persisted review workflow
+- Project-aware analysis requests with required task type:
+  - `feature`
+  - `enhancement`
+  - `bug`
+  - `technical_task`
+  - `spike`
+- Initial analysis can stop for clarification instead of forcing final implementation output
+- Multiple clarification rounds with persisted AI questions and user answers
+- Dedicated final Results section for completed analyses
+- Persisted review workflow for completed outputs
 - Review statuses on analysis runs:
   - `draft`
   - `reviewed`
@@ -24,9 +34,11 @@ Internal service for ingesting specifications and architecture documents, retrie
   - explicit `assumptions`
 - Internal UI pages for:
   - dashboard at `/`
+  - project create/list/detail at `/projects`
   - document upload/list/detail at `/documents`
   - analysis creation at `/analysis-runs/new`
-  - analysis run queue at `/analysis-runs`
+  - clarification queue at `/clarifications`
+  - completed results at `/results`
   - full structured review page at `/analysis-runs/{analysis_run_id}`
   - Jira export preview at `/analysis-runs/{analysis_run_id}/export`
 - Manual Jira export flow with explicit preview and confirmation
@@ -61,10 +73,12 @@ Internal service for ingesting specifications and architecture documents, retrie
 ## Still pending or intentionally stubbed
 
 - Extraction currently supports only `.txt` and `.md`
+- Project GitHub clone/archive indexing is not implemented yet; this milestone records the source and leaves an explicit ingestion boundary
 - Embedding generation is not wired yet, so pgvector similarity remains inactive scaffolding
 - Retrieval still uses deterministic text ranking rather than embeddings
 - Analysis generation remains deterministic and rule-based
 - Automatic Jira creation is intentionally not implemented
+- Jira field mapping expansion is intentionally deferred
 - PDF and DOCX ingestion remain out of scope
 
 ## Canonical local run
@@ -137,21 +151,47 @@ http://127.0.0.1:8000
 
 ## Main UI flow
 
-1. Upload a document in `/documents`
-2. Start an analysis run in `/analysis-runs/new`
-3. Review the full structured result in `/analysis-runs/{analysis_run_id}`
-4. Update review status and reviewer note
-5. Open the Jira export preview from the analysis run detail page
-6. Confirm the export explicitly
-7. If Jira is not fully configured, inspect the dry-run payload and use it manually
+1. Create a project in `/projects` using a GitHub URL or uploaded archive
+2. Upload supporting `.txt` or `.md` source documents in `/documents`
+3. Start an analysis request in `/analysis-runs/new` and select the project and task type
+4. If the request is under-specified, answer questions from `/clarifications` or the analysis detail page
+5. Repeat clarification until the run reaches `completed`
+6. Review completed final output in `/results`
+7. Open the Jira export preview from the completed analysis detail page when appropriate
+8. If Jira is not fully configured, inspect the dry-run payload and use it manually
 
 ## Main API flow
 
-1. Upload a document with `POST /api/v1/documents/upload`
-2. Start an analysis run with `POST /api/v1/analysis-runs`
-3. Review or update approval state with `PATCH /api/v1/analysis-runs/{analysis_run_id}/review`
-4. Build the export preview with `POST /api/v1/exports/jira/preview`
-5. Confirm the export with `POST /api/v1/exports/jira`
+1. Create a project with `POST /api/v1/projects`
+2. Upload a document with `POST /api/v1/documents/upload`
+3. Start an analysis request with `POST /api/v1/analysis-runs`
+4. When status is `needs_clarification`, answer with `POST /api/v1/analysis-runs/{analysis_run_id}/clarifications`
+5. List completed final outputs with `GET /api/v1/analysis-runs/results`
+6. Review or update approval state with `PATCH /api/v1/analysis-runs/{analysis_run_id}/review`
+7. Build the export preview with `POST /api/v1/exports/jira/preview`
+8. Confirm the export with `POST /api/v1/exports/jira`
+
+### Example analysis request
+
+```json
+{
+  "project_id": "<project-uuid>",
+  "task_type": "feature",
+  "input_type": "text",
+  "input_text": "Add project-aware analysis with clarification rounds.",
+  "query": "Project-aware analysis workflow",
+  "document_ids": ["<document-uuid>"],
+  "max_chunks": 6
+}
+```
+
+Possible analysis statuses:
+
+- `draft`
+- `needs_clarification`
+- `clarification_answered`
+- `ready_for_final_analysis`
+- `completed`
 
 ### Example Jira preview request
 

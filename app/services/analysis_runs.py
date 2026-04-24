@@ -1,14 +1,21 @@
 from collections.abc import Iterable
 from uuid import UUID
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.analysis_run import AnalysisRun
+from app.models.clarification_round import ClarificationRound
 from app.models.document import Document
 from app.models.generated_task import GeneratedTask
+from app.models.project import Project
 from app.schemas.analysis import (
     AnalysisOutput,
+    ClarificationAnswerRequest,
+    ClarificationRoundResponse,
+    InitialAnalysisOutput,
     AnalysisRunCreateRequest,
     AnalysisRunListItem,
     AnalysisRunReviewUpdateRequest,
@@ -28,6 +35,7 @@ TASK_SECTION_NAMES = (
     "observability_tasks",
 )
 REVIEW_STATUSES = ("draft", "reviewed", "approved", "rejected")
+NEEDS_MORE_INFO_MARKERS = ("unknown", "tbd", "not sure", "unclear", "later")
 
 
 class AnalysisRunService:
@@ -36,6 +44,9 @@ class AnalysisRunService:
         self.retrieval = RetrievalService(db)
 
     def create_run(self, payload: AnalysisRunCreateRequest) -> AnalysisRunResponse:
+        project = self.db.get(Project, payload.project_id)
+        if project is None:
+            raise ValueError("Selected project was not found.")
         requested_documents = self._load_documents(payload.document_ids)
         retrieved_chunks = self.retrieval.search_chunks(
             query=payload.query,
@@ -44,19 +55,46 @@ class AnalysisRunService:
             metadata_filters=payload.metadata_filters,
             limit=payload.max_chunks,
         )
-        output = self._build_output(payload=payload, documents=requested_documents, retrieved_chunks=retrieved_chunks)
+        clarification = self._build_initial_analysis(
+            payload=payload,
+            project=project,
+            documents=requested_documents,
+            retrieved_chunks=retrieved_chunks,
+            prior_answers=[],
+        )
         validation_notes = self._build_validation_notes(payload, requested_documents, retrieved_chunks)
+        is_ready = self._is_ready_for_final_analysis(clarification, prior_answers=[])
+        output = (
+            self._build_output(payload=payload, documents=requested_documents, retrieved_chunks=retrieved_chunks)
+            if is_ready
+            else self._placeholder_output(clarification)
+        )
 
         run = AnalysisRun(
             document_id=payload.document_ids[0] if payload.document_ids else None,
-            status="completed",
+            project_id=payload.project_id,
+            task_type=payload.task_type,
+            input_type=payload.input_type,
+            input_text=payload.input_text.strip(),
+            input_file_reference=payload.input_file_reference,
+            status="completed" if is_ready else "needs_clarification",
             review_status="draft",
             reviewer_note="",
             request_payload=payload.model_dump(mode="json"),
             output_payload=output.model_dump(mode="json"),
+            clarification_payload=clarification.model_dump(mode="json"),
             validation_notes=validation_notes,
         )
-        run.generated_tasks = self._build_generated_task_rows(output)
+        if is_ready:
+            run.generated_tasks = self._build_generated_task_rows(output)
+        else:
+            run.clarification_rounds = [
+                ClarificationRound(
+                    round_index=1,
+                    questions=clarification.clarifying_questions,
+                    answers="",
+                )
+            ]
 
         self.db.add(run)
         self.db.commit()
@@ -66,7 +104,11 @@ class AnalysisRunService:
     def get_run(self, analysis_run_id: UUID) -> AnalysisRunResponse | None:
         statement = (
             select(AnalysisRun)
-            .options(selectinload(AnalysisRun.generated_tasks))
+            .options(
+                selectinload(AnalysisRun.generated_tasks),
+                selectinload(AnalysisRun.project),
+                selectinload(AnalysisRun.clarification_rounds),
+            )
             .where(AnalysisRun.id == analysis_run_id)
         )
         run = self.db.scalars(statement).first()
@@ -75,7 +117,7 @@ class AnalysisRunService:
         return self._to_response(run)
 
     def list_runs(self) -> list[AnalysisRunListItem]:
-        statement = select(AnalysisRun).order_by(AnalysisRun.created_at.desc())
+        statement = select(AnalysisRun).options(selectinload(AnalysisRun.project)).order_by(AnalysisRun.created_at.desc())
         runs = self.db.scalars(statement).all()
         items: list[AnalysisRunListItem] = []
         for run in runs:
@@ -84,6 +126,9 @@ class AnalysisRunService:
                 AnalysisRunListItem(
                     id=run.id,
                     status=run.status,
+                    project_id=run.project_id,
+                    project_name=run.project.name if run.project else None,
+                    task_type=run.task_type,
                     review_status=run.review_status,
                     reviewer_note=run.reviewer_note or "",
                     document_id=run.document_id,
@@ -93,6 +138,76 @@ class AnalysisRunService:
                 )
             )
         return items
+
+    def list_results(self) -> list[AnalysisRunListItem]:
+        return [run for run in self.list_runs() if run.status == "completed"]
+
+    def answer_clarification(
+        self,
+        analysis_run_id: UUID,
+        payload: ClarificationAnswerRequest,
+    ) -> AnalysisRunResponse | None:
+        statement = (
+            select(AnalysisRun)
+            .options(
+                selectinload(AnalysisRun.generated_tasks),
+                selectinload(AnalysisRun.project),
+                selectinload(AnalysisRun.clarification_rounds),
+            )
+            .where(AnalysisRun.id == analysis_run_id)
+        )
+        run = self.db.scalars(statement).first()
+        if run is None:
+            return None
+        if run.status == "completed":
+            raise ValueError("Completed analysis results cannot accept clarification answers.")
+
+        pending_round = next((round_ for round_ in run.clarification_rounds if not round_.answers), None)
+        if pending_round is None:
+            raise ValueError("No pending clarification round is available.")
+
+        pending_round.answers = payload.answers.strip()
+        pending_round.answered_at = datetime.now(UTC)
+        run.status = "clarification_answered"
+
+        create_payload = AnalysisRunCreateRequest.model_validate(run.request_payload)
+        documents = self._load_documents(create_payload.document_ids)
+        retrieved_chunks = self.retrieval.search_chunks(
+            query=create_payload.query,
+            document_ids=create_payload.document_ids,
+            document_kind=create_payload.document_kind,
+            metadata_filters=create_payload.metadata_filters,
+            limit=create_payload.max_chunks,
+        )
+        prior_answers = [round_.answers for round_ in run.clarification_rounds if round_.answers]
+        clarification = self._build_initial_analysis(
+            payload=create_payload,
+            project=run.project,
+            documents=documents,
+            retrieved_chunks=retrieved_chunks,
+            prior_answers=prior_answers,
+        )
+        run.clarification_payload = clarification.model_dump(mode="json")
+
+        if self._is_ready_for_final_analysis(clarification, prior_answers=prior_answers):
+            output = self._build_output(payload=create_payload, documents=documents, retrieved_chunks=retrieved_chunks)
+            run.status = "completed"
+            run.output_payload = output.model_dump(mode="json")
+            run.generated_tasks = self._build_generated_task_rows(output)
+        else:
+            run.status = "needs_clarification"
+            run.clarification_rounds.append(
+                ClarificationRound(
+                    round_index=len(run.clarification_rounds) + 1,
+                    questions=clarification.clarifying_questions,
+                    answers="",
+                )
+            )
+
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+        return self.get_run(run.id)
 
     def update_review(
         self,
@@ -112,6 +227,99 @@ class AnalysisRunService:
         self.db.commit()
         self.db.refresh(run)
         return self._to_response(run)
+
+    def _build_initial_analysis(
+        self,
+        *,
+        payload: AnalysisRunCreateRequest,
+        project: Project | None,
+        documents: list[Document],
+        retrieved_chunks: list[RetrievedChunk],
+        prior_answers: list[str],
+    ) -> InitialAnalysisOutput:
+        missing_information: list[str] = []
+        questions: list[str] = []
+        assumptions = [
+            "Project repository/archive content is registered but not cloned or indexed in this milestone.",
+            "Existing uploaded documents remain the only retrievable architecture context.",
+        ]
+        latest_answer = prior_answers[-1].lower() if prior_answers else ""
+        answer_text = " ".join(prior_answers).lower()
+
+        if not payload.input_text.strip() and not payload.input_file_reference:
+            missing_information.append("No detailed task input was provided.")
+            questions.append("What exact behavior, defect, or research question should be analyzed?")
+        if not retrieved_chunks:
+            missing_information.append("No grounded document chunks matched the request.")
+            questions.append("Which source documents or architecture sections should ground this request?")
+        if not self._has_signal(retrieved_chunks, ("acceptance", "criteria", "expected", "test", "validate")) and not any(
+            signal in answer_text for signal in ("acceptance", "criteria", "expected", "validate", "coverage")
+        ):
+            missing_information.append("Acceptance expectations are not explicit in the available context.")
+            questions.append("What acceptance criteria or observable outcome should confirm this work is done?")
+        if (
+            payload.task_type == "bug"
+            and not self._has_signal(retrieved_chunks, ("error", "bug", "actual", "expected", "reproduce"))
+            and not all(signal in answer_text for signal in ("actual", "expected"))
+        ):
+            missing_information.append("Bug reproduction details are missing.")
+            questions.append("What are the actual behavior, expected behavior, and reproduction steps?")
+        if payload.task_type == "spike" and not self._has_signal(retrieved_chunks, ("decision", "option", "tradeoff", "research")):
+            missing_information.append("Research decision criteria are missing.")
+            questions.append("Which options, constraints, or decision criteria should the spike compare?")
+
+        if prior_answers and any(marker in latest_answer for marker in NEEDS_MORE_INFO_MARKERS):
+            missing_information.append("The latest clarification answer still contains unresolved placeholders.")
+            questions.append("Please replace unknown or TBD parts with concrete constraints or mark them out of scope.")
+
+        confidence = self._compute_confidence(retrieved_chunks, questions)
+        if prior_answers and missing_information:
+            confidence = min(0.74, round(confidence + 0.18, 2))
+        elif prior_answers:
+            confidence = max(0.76, confidence)
+
+        scope = [payload.query]
+        if payload.input_text.strip():
+            scope.append(payload.input_text.strip()[:240])
+        if project:
+            scope.append(f"Project: {project.name}")
+
+        return InitialAnalysisOutput(
+            request_summary=f"{payload.task_type.replace('_', ' ').title()} request for {project.name if project else 'selected project'}: {payload.query}",
+            task_type=payload.task_type,
+            understood_scope=scope,
+            suspected_affected_components=self._affected_components(documents, retrieved_chunks),
+            missing_information=missing_information,
+            clarifying_questions=questions,
+            preliminary_assumptions=assumptions,
+            confidence=confidence,
+        )
+
+    @staticmethod
+    def _is_ready_for_final_analysis(clarification: InitialAnalysisOutput, prior_answers: list[str]) -> bool:
+        if not clarification.clarifying_questions and clarification.confidence >= 0.5:
+            return True
+        if prior_answers and clarification.confidence >= 0.75 and len(clarification.missing_information) <= 1:
+            return True
+        return False
+
+    @staticmethod
+    def _placeholder_output(clarification: InitialAnalysisOutput) -> AnalysisOutput:
+        return AnalysisOutput(
+            feature_summary=clarification.request_summary,
+            affected_components=clarification.suspected_affected_components,
+            backend_tasks=[],
+            frontend_tasks=[],
+            integration_tasks=[],
+            db_changes=[],
+            qa_tasks=[],
+            observability_tasks=[],
+            risks=["Final implementation analysis is intentionally blocked until clarification is complete."],
+            open_questions=clarification.clarifying_questions,
+            assumptions=clarification.preliminary_assumptions,
+            source_references=[],
+            confidence=clarification.confidence,
+        )
 
     def _build_output(
         self,
@@ -507,13 +715,29 @@ class AnalysisRunService:
     @staticmethod
     def _to_response(run: AnalysisRun) -> AnalysisRunResponse:
         output = AnalysisOutput.model_validate(run.output_payload)
+        clarification = (
+            InitialAnalysisOutput.model_validate(run.clarification_payload)
+            if run.clarification_payload
+            else None
+        )
         return AnalysisRunResponse(
             id=run.id,
             status=run.status,
+            project_id=run.project_id,
+            project_name=run.project.name if run.project else None,
+            task_type=run.task_type,
+            input_type=run.input_type,
+            input_text=run.input_text or "",
+            input_file_reference=run.input_file_reference,
             review_status=run.review_status,
             reviewer_note=run.reviewer_note or "",
             document_id=run.document_id,
             request_payload=run.request_payload or {},
+            clarification=clarification,
+            clarification_rounds=[
+                ClarificationRoundResponse.model_validate(round_)
+                for round_ in run.clarification_rounds
+            ],
             validation_notes=run.validation_notes,
             created_at=run.created_at,
             **output.model_dump(),

@@ -6,6 +6,15 @@ from pydantic import BaseModel, Field
 
 
 ReviewStatus = Literal["draft", "reviewed", "approved", "rejected"]
+TaskType = Literal["feature", "enhancement", "bug", "technical_task", "spike"]
+InputType = Literal["text", "file"]
+AnalysisStatus = Literal[
+    "draft",
+    "needs_clarification",
+    "clarification_answered",
+    "ready_for_final_analysis",
+    "completed",
+]
 
 
 class SourceReference(BaseModel):
@@ -44,7 +53,23 @@ class AnalysisOutput(BaseModel):
     confidence: float = 0.0
 
 
+class InitialAnalysisOutput(BaseModel):
+    request_summary: str
+    task_type: TaskType
+    understood_scope: list[str] = Field(default_factory=list)
+    suspected_affected_components: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    clarifying_questions: list[str] = Field(default_factory=list)
+    preliminary_assumptions: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
 class AnalysisRunCreateRequest(BaseModel):
+    project_id: UUID
+    task_type: TaskType
+    input_type: InputType = "text"
+    input_text: str = ""
+    input_file_reference: str | None = None
     query: str = Field(
         default="Summarize the implementation work required by the selected documents.",
         min_length=1,
@@ -58,10 +83,18 @@ class AnalysisRunCreateRequest(BaseModel):
 class AnalysisRunResponse(AnalysisOutput):
     id: UUID
     status: str
+    project_id: UUID | None = None
+    project_name: str | None = None
+    task_type: str = "feature"
+    input_type: str = "text"
+    input_text: str = ""
+    input_file_reference: str | None = None
     review_status: ReviewStatus
     reviewer_note: str = ""
     document_id: UUID | None = None
     request_payload: dict = Field(default_factory=dict)
+    clarification: InitialAnalysisOutput | None = None
+    clarification_rounds: list["ClarificationRoundResponse"] = Field(default_factory=list)
     validation_notes: str = ""
     created_at: datetime
 
@@ -71,6 +104,9 @@ class AnalysisRunResponse(AnalysisOutput):
 class AnalysisRunListItem(BaseModel):
     id: UUID
     status: str
+    project_id: UUID | None = None
+    project_name: str | None = None
+    task_type: str = "feature"
     review_status: ReviewStatus
     reviewer_note: str = ""
     document_id: UUID | None = None
@@ -82,3 +118,18 @@ class AnalysisRunListItem(BaseModel):
 class AnalysisRunReviewUpdateRequest(BaseModel):
     review_status: ReviewStatus
     reviewer_note: str = Field(default="", max_length=4000)
+
+
+class ClarificationRoundResponse(BaseModel):
+    id: UUID
+    round_index: int
+    questions: list[str] = Field(default_factory=list)
+    answers: str = ""
+    created_at: datetime
+    answered_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ClarificationAnswerRequest(BaseModel):
+    answers: str = Field(min_length=1, max_length=8000)
