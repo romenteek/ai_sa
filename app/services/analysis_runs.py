@@ -23,6 +23,7 @@ from app.schemas.analysis import (
     GeneratedTaskPayload,
     SourceReference,
 )
+from app.services.language import LanguageCode, detect_language, has_any
 from app.services.retrieval import RetrievalService, RetrievedChunk
 
 
@@ -36,6 +37,7 @@ TASK_SECTION_NAMES = (
 )
 REVIEW_STATUSES = ("draft", "reviewed", "approved", "rejected")
 NEEDS_MORE_INFO_MARKERS = ("unknown", "tbd", "not sure", "unclear", "later")
+RU_NEEDS_MORE_INFO_MARKERS = ("неизвестно", "позже", "неясно", "уточнить", "пока не")
 
 
 class AnalysisRunService:
@@ -55,12 +57,19 @@ class AnalysisRunService:
             metadata_filters=payload.metadata_filters,
             limit=payload.max_chunks,
         )
+        language = payload.language or self._detect_payload_language(
+            payload=payload,
+            documents=requested_documents,
+            retrieved_chunks=retrieved_chunks,
+        )
+        payload.language = language
         clarification = self._build_initial_analysis(
             payload=payload,
             project=project,
             documents=requested_documents,
             retrieved_chunks=retrieved_chunks,
             prior_answers=[],
+            language=language,
         )
         validation_notes = self._build_validation_notes(payload, requested_documents, retrieved_chunks)
         is_ready = self._is_ready_for_final_analysis(clarification, prior_answers=[])
@@ -180,12 +189,20 @@ class AnalysisRunService:
             limit=create_payload.max_chunks,
         )
         prior_answers = [round_.answers for round_ in run.clarification_rounds if round_.answers]
+        language = create_payload.language or self._detect_payload_language(
+            payload=create_payload,
+            documents=documents,
+            retrieved_chunks=retrieved_chunks,
+            prior_answers=prior_answers,
+        )
+        create_payload.language = language
         clarification = self._build_initial_analysis(
             payload=create_payload,
             project=run.project,
             documents=documents,
             retrieved_chunks=retrieved_chunks,
             prior_answers=prior_answers,
+            language=language,
         )
         run.clarification_payload = clarification.model_dump(mode="json")
 
@@ -236,41 +253,52 @@ class AnalysisRunService:
         documents: list[Document],
         retrieved_chunks: list[RetrievedChunk],
         prior_answers: list[str],
+        language: LanguageCode,
     ) -> InitialAnalysisOutput:
         missing_information: list[str] = []
         questions: list[str] = []
-        assumptions = [
-            "Project repository/archive content is registered but not cloned or indexed in this milestone.",
-            "Existing uploaded documents remain the only retrievable architecture context.",
-        ]
+        assumptions = self._localized_list(
+            language,
+            en=[
+                "Project repository/archive content is registered but not cloned or indexed in this milestone.",
+                "Existing uploaded documents remain the only retrievable architecture context.",
+                "Language detection is heuristic and based on the request, answers, and retrieved document text.",
+            ],
+            ru=[
+                "Источник проекта сохранен, но репозиторий или архив еще не клонируется и не индексируется в этом milestone.",
+                "Доступный архитектурный контекст берется только из загруженных документов.",
+                "Определение языка эвристическое: по запросу, ответам и найденному тексту документов.",
+            ],
+        )
         latest_answer = prior_answers[-1].lower() if prior_answers else ""
         answer_text = " ".join(prior_answers).lower()
 
         if not payload.input_text.strip() and not payload.input_file_reference:
-            missing_information.append("No detailed task input was provided.")
-            questions.append("What exact behavior, defect, or research question should be analyzed?")
+            missing_information.append(self._message(language, "missing_input"))
+            questions.append(self._message(language, "question_input"))
         if not retrieved_chunks:
-            missing_information.append("No grounded document chunks matched the request.")
-            questions.append("Which source documents or architecture sections should ground this request?")
-        if not self._has_signal(retrieved_chunks, ("acceptance", "criteria", "expected", "test", "validate")) and not any(
-            signal in answer_text for signal in ("acceptance", "criteria", "expected", "validate", "coverage")
+            missing_information.append(self._message(language, "missing_context"))
+            questions.append(self._message(language, "question_context"))
+        if not self._has_signal(retrieved_chunks, self._signals("acceptance")) and not any(
+            signal in answer_text for signal in self._signals("acceptance")
         ):
-            missing_information.append("Acceptance expectations are not explicit in the available context.")
-            questions.append("What acceptance criteria or observable outcome should confirm this work is done?")
+            missing_information.append(self._message(language, "missing_acceptance"))
+            questions.append(self._message(language, "question_acceptance"))
         if (
             payload.task_type == "bug"
-            and not self._has_signal(retrieved_chunks, ("error", "bug", "actual", "expected", "reproduce"))
-            and not all(signal in answer_text for signal in ("actual", "expected"))
+            and not self._has_signal(retrieved_chunks, self._signals("bug"))
+            and not all(any(signal in answer_text for signal in group) for group in (self._signals("actual"), self._signals("expected")))
         ):
-            missing_information.append("Bug reproduction details are missing.")
-            questions.append("What are the actual behavior, expected behavior, and reproduction steps?")
-        if payload.task_type == "spike" and not self._has_signal(retrieved_chunks, ("decision", "option", "tradeoff", "research")):
-            missing_information.append("Research decision criteria are missing.")
-            questions.append("Which options, constraints, or decision criteria should the spike compare?")
+            missing_information.append(self._message(language, "missing_bug"))
+            questions.append(self._message(language, "question_bug"))
+        if payload.task_type == "spike" and not self._has_signal(retrieved_chunks, self._signals("research")):
+            missing_information.append(self._message(language, "missing_research"))
+            questions.append(self._message(language, "question_research"))
 
-        if prior_answers and any(marker in latest_answer for marker in NEEDS_MORE_INFO_MARKERS):
-            missing_information.append("The latest clarification answer still contains unresolved placeholders.")
-            questions.append("Please replace unknown or TBD parts with concrete constraints or mark them out of scope.")
+        markers = NEEDS_MORE_INFO_MARKERS + RU_NEEDS_MORE_INFO_MARKERS
+        if prior_answers and any(marker in latest_answer for marker in markers):
+            missing_information.append(self._message(language, "missing_placeholders"))
+            questions.append(self._message(language, "question_placeholders"))
 
         confidence = self._compute_confidence(retrieved_chunks, questions)
         if prior_answers and missing_information:
@@ -282,11 +310,12 @@ class AnalysisRunService:
         if payload.input_text.strip():
             scope.append(payload.input_text.strip()[:240])
         if project:
-            scope.append(f"Project: {project.name}")
+            scope.append(("Project: " if language == "en" else "Проект: ") + project.name)
 
         return InitialAnalysisOutput(
-            request_summary=f"{payload.task_type.replace('_', ' ').title()} request for {project.name if project else 'selected project'}: {payload.query}",
+            request_summary=self._request_summary(payload, project, language),
             task_type=payload.task_type,
+            language=language,
             understood_scope=scope,
             suspected_affected_components=self._affected_components(documents, retrieved_chunks),
             missing_information=missing_information,
@@ -304,6 +333,132 @@ class AnalysisRunService:
         return False
 
     @staticmethod
+    def _detect_payload_language(
+        *,
+        payload: AnalysisRunCreateRequest,
+        documents: list[Document],
+        retrieved_chunks: list[RetrievedChunk],
+        prior_answers: list[str] | None = None,
+    ) -> LanguageCode:
+        return detect_language(
+            payload.input_text,
+            payload.query,
+            " ".join(prior_answers or []),
+            " ".join(document.extracted_text[:1000] for document in documents),
+            " ".join(chunk.text[:1000] for chunk in retrieved_chunks),
+            fallback="en",
+        )
+
+    @staticmethod
+    def _localized_list(language: LanguageCode, *, en: list[str], ru: list[str]) -> list[str]:
+        return ru if language == "ru" else en
+
+    @staticmethod
+    def _request_summary(
+        payload: AnalysisRunCreateRequest,
+        project: Project | None,
+        language: LanguageCode,
+    ) -> str:
+        project_name = project.name if project else ("selected project" if language == "en" else "выбранного проекта")
+        task_type = payload.task_type.replace("_", " ")
+        if language == "ru":
+            return f"Запрос типа '{task_type}' для проекта {project_name}: {payload.query}"
+        return f"{task_type.title()} request for {project_name}: {payload.query}"
+
+    @staticmethod
+    def _signals(kind: str) -> tuple[str, ...]:
+        signals = {
+            "acceptance": (
+                "acceptance",
+                "criteria",
+                "expected",
+                "test",
+                "validate",
+                "coverage",
+                "прием",
+                "критер",
+                "ожида",
+                "тест",
+                "провер",
+                "покрыт",
+            ),
+            "bug": (
+                "error",
+                "bug",
+                "actual",
+                "expected",
+                "reproduce",
+                "ошиб",
+                "баг",
+                "факт",
+                "ожида",
+                "воспроиз",
+            ),
+            "actual": ("actual", "факт", "сейчас", "получаем"),
+            "expected": ("expected", "ожида", "должн"),
+            "research": ("decision", "option", "tradeoff", "research", "решен", "вариант", "компромисс", "исслед"),
+        }
+        return signals[kind]
+
+    @staticmethod
+    def _message(language: LanguageCode, key: str) -> str:
+        messages = {
+            "missing_input": {
+                "en": "No detailed task input was provided.",
+                "ru": "Не предоставлено подробное описание задачи.",
+            },
+            "question_input": {
+                "en": "What exact behavior, defect, or research question should be analyzed?",
+                "ru": "Какое поведение, дефект или исследовательский вопрос нужно проанализировать?",
+            },
+            "missing_context": {
+                "en": "No grounded document chunks matched the request.",
+                "ru": "По запросу не найдено подтвержденных фрагментов документов.",
+            },
+            "question_context": {
+                "en": "Which source documents or architecture sections should ground this request?",
+                "ru": "Какие документы или разделы архитектуры должны быть основой для этого запроса?",
+            },
+            "missing_acceptance": {
+                "en": "Acceptance expectations are not explicit in the available context.",
+                "ru": "В доступном контексте не хватает явных критериев приемки.",
+            },
+            "question_acceptance": {
+                "en": "What acceptance criteria or observable outcome should confirm this work is done?",
+                "ru": "Какие критерии приемки или наблюдаемый результат подтвердят, что работа выполнена?",
+            },
+            "missing_bug": {
+                "en": "Bug reproduction details are missing.",
+                "ru": "Не хватает деталей воспроизведения ошибки.",
+            },
+            "question_bug": {
+                "en": "What are the actual behavior, expected behavior, and reproduction steps?",
+                "ru": "Каковы фактическое поведение, ожидаемое поведение и шаги воспроизведения?",
+            },
+            "missing_research": {
+                "en": "Research decision criteria are missing.",
+                "ru": "Не хватает критериев решения для исследования.",
+            },
+            "question_research": {
+                "en": "Which options, constraints, or decision criteria should the spike compare?",
+                "ru": "Какие варианты, ограничения или критерии решения должен сравнить spike?",
+            },
+            "missing_placeholders": {
+                "en": "The latest clarification answer still contains unresolved placeholders.",
+                "ru": "Последний ответ на уточнение все еще содержит нерешенные placeholders.",
+            },
+            "question_placeholders": {
+                "en": "Please replace unknown or TBD parts with concrete constraints or mark them out of scope.",
+                "ru": "Замените неизвестные/TBD части конкретными ограничениями или явно исключите их из scope.",
+            },
+            "final_missing_context_note": {
+                "en": "No matching chunks were retrieved from the selected documents, so the analysis stays minimal.",
+                "ru": "В выбранных документах не найдено совпадающих фрагментов, поэтому анализ остается минимальным.",
+            },
+        }
+        return messages[key][language]
+
+    @staticmethod
     def _placeholder_output(clarification: InitialAnalysisOutput) -> AnalysisOutput:
         return AnalysisOutput(
             feature_summary=clarification.request_summary,
@@ -314,7 +469,11 @@ class AnalysisRunService:
             db_changes=[],
             qa_tasks=[],
             observability_tasks=[],
-            risks=["Final implementation analysis is intentionally blocked until clarification is complete."],
+            risks=[
+                "Final implementation analysis is intentionally blocked until clarification is complete."
+                if clarification.language == "en"
+                else "Финальный анализ намеренно заблокирован до завершения уточнений."
+            ],
             open_questions=clarification.clarifying_questions,
             assumptions=clarification.preliminary_assumptions,
             source_references=[],
@@ -328,17 +487,26 @@ class AnalysisRunService:
         documents: list[Document],
         retrieved_chunks: list[RetrievedChunk],
     ) -> AnalysisOutput:
+        language = payload.language or "en"
         source_references = [
-            chunk.to_source_reference(rationale=f"Retrieved for query '{payload.query}'.")
+            chunk.to_source_reference(
+                rationale=(
+                    f"Retrieved for query '{payload.query}'."
+                    if language == "en"
+                    else f"Найдено по запросу '{payload.query}'."
+                )
+            )
             for chunk in retrieved_chunks
         ]
 
         if not retrieved_chunks:
-            missing_context_note = (
-                "No matching chunks were retrieved from the selected documents, so the analysis stays minimal."
-            )
+            missing_context_note = self._message(language, "final_missing_context_note")
             return AnalysisOutput(
-                feature_summary=f"{payload.query} Limited context was available in the uploaded documents.",
+                feature_summary=(
+                    f"{payload.query} Limited context was available in the uploaded documents."
+                    if language == "en"
+                    else f"{payload.query} В загруженных документах найден ограниченный контекст."
+                ),
                 affected_components=self._affected_components(documents, retrieved_chunks),
                 backend_tasks=[],
                 frontend_tasks=[],
@@ -347,13 +515,25 @@ class AnalysisRunService:
                 qa_tasks=[
                     self._make_task(
                         task_type="qa_tasks",
-                        title="Confirm the missing implementation details before execution",
+                        title=(
+                            "Confirm the missing implementation details before execution"
+                            if language == "en"
+                            else "Уточнить недостающие детали реализации перед выполнением"
+                        ),
                         description=missing_context_note,
-                        why_needed="The current document set does not provide enough grounded evidence for implementation tasks.",
+                        why_needed=(
+                            "The current document set does not provide enough grounded evidence for implementation tasks."
+                            if language == "en"
+                            else "Текущий набор документов не дает достаточно подтвержденного контекста для задач реализации."
+                        ),
                         service_or_component="analysis-review",
                         acceptance_criteria=[
-                            "Identify the missing specification sections or architecture decisions.",
-                            "Upload or link the missing documents before generating delivery tasks.",
+                            "Identify the missing specification sections or architecture decisions."
+                            if language == "en"
+                            else "Определить недостающие разделы спецификации или архитектурные решения.",
+                            "Upload or link the missing documents before generating delivery tasks."
+                            if language == "en"
+                            else "Загрузить или связать недостающие документы перед генерацией задач.",
                         ],
                         dependencies=[],
                         assumptions=[],
@@ -362,11 +542,21 @@ class AnalysisRunService:
                     )
                 ],
                 observability_tasks=[],
-                risks=["The available material is insufficient to derive grounded delivery tasks."],
+                risks=[
+                    "The available material is insufficient to derive grounded delivery tasks."
+                    if language == "en"
+                    else "Доступного материала недостаточно для обоснованных задач разработки."
+                ],
                 open_questions=[
                     "Which specification or architecture documents should be added so the analysis can cite concrete implementation details?"
+                    if language == "en"
+                    else "Какие спецификации или архитектурные документы нужно добавить, чтобы анализ ссылался на конкретные детали реализации?"
                 ],
-                assumptions=["The selected document set is incomplete for this feature."],
+                assumptions=[
+                    "The selected document set is incomplete for this feature."
+                    if language == "en"
+                    else "Выбранный набор документов неполон для этой задачи."
+                ],
                 source_references=source_references,
                 confidence=0.2,
             )
@@ -377,7 +567,7 @@ class AnalysisRunService:
         db_changes = self._maybe_db_tasks(retrieved_chunks)
         qa_tasks = self._build_qa_tasks(payload, retrieved_chunks)
         observability_tasks = self._maybe_observability_tasks(retrieved_chunks)
-        risks = self._build_risks(retrieved_chunks)
+        risks = self._build_risks(retrieved_chunks, language=language)
         open_questions = self._build_open_questions(payload, documents, retrieved_chunks)
         assumptions = self._build_assumptions(payload, documents, retrieved_chunks)
         confidence = self._compute_confidence(retrieved_chunks, open_questions)
@@ -431,14 +621,30 @@ class AnalysisRunService:
         retrieved_chunks: list[RetrievedChunk],
     ) -> str:
         notes = [
-            "Deterministic retrieval-based analysis only; no LLM generation is active in this milestone.",
-            f"Vector similarity available: {'yes' if self.retrieval.vector_search_enabled() else 'no'}",
-            f"Retrieved chunks: {len(retrieved_chunks)}",
+            (
+                "Deterministic retrieval-based analysis only; no LLM generation is active in this milestone."
+                if payload.language != "ru"
+                else "Анализ детерминированный и основан на поиске; LLM-генерация в этом milestone не активна."
+            ),
+            (
+                f"Vector similarity available: {'yes' if self.retrieval.vector_search_enabled() else 'no'}"
+                if payload.language != "ru"
+                else f"Векторное сходство доступно: {'да' if self.retrieval.vector_search_enabled() else 'нет'}"
+            ),
+            f"Retrieved chunks: {len(retrieved_chunks)}" if payload.language != "ru" else f"Найдено фрагментов: {len(retrieved_chunks)}",
         ]
         if payload.document_ids and len(documents) != len(payload.document_ids):
-            notes.append("One or more requested documents were not found.")
+            notes.append(
+                "One or more requested documents were not found."
+                if payload.language != "ru"
+                else "Один или несколько выбранных документов не найдены."
+            )
         if not retrieved_chunks:
-            notes.append("No grounded chunk matches were found for the requested query.")
+            notes.append(
+                "No grounded chunk matches were found for the requested query."
+                if payload.language != "ru"
+                else "По запросу не найдено подтвержденных совпадений во фрагментах."
+            )
         return " ".join(notes)
 
     def _feature_summary(
@@ -449,6 +655,11 @@ class AnalysisRunService:
     ) -> str:
         filenames = sorted({chunk.filename for chunk in retrieved_chunks}) or [document.filename for document in documents]
         file_list = ", ".join(filenames[:3])
+        if payload.language == "ru":
+            return (
+                f"{payload.query} Найден подтвержденный контекст: {len(retrieved_chunks)} фрагмент(ов)"
+                f" в {len(filenames)} документ(ах): {file_list}."
+            )
         return (
             f"{payload.query} Grounded evidence was retrieved from {len(retrieved_chunks)} chunk(s)"
             f" across {len(filenames)} document(s): {file_list}."
@@ -570,6 +781,28 @@ class AnalysisRunService:
         payload: AnalysisRunCreateRequest,
         retrieved_chunks: list[RetrievedChunk],
     ) -> list[GeneratedTaskPayload]:
+        language = payload.language or "en"
+        if language == "ru":
+            return [
+                self._make_task(
+                    task_type="qa_tasks",
+                    title="Добавить покрытие для анализа на основе найденного контекста",
+                    description=(
+                        f"Проверить детерминированный поток анализа для '{payload.query}', включая фильтры поиска,"
+                        " ссылки на источники и строгую форму ответа."
+                    ),
+                    why_needed="Пайплайн зависит от подтвержденного контекста, поэтому регрессии в поиске и JSON-форме должны обнаруживаться быстро.",
+                    service_or_component="tests",
+                    acceptance_criteria=[
+                        "Тесты проверяют строгий верхнеуровневый контракт ответа.",
+                        "Тесты проверяют наличие ссылок на источники и confidence.",
+                    ],
+                    dependencies=[],
+                    assumptions=[],
+                    source_refs=self._task_refs(retrieved_chunks, "Покрытие тестами должно учитывать эти требования из источников."),
+                    confidence=0.8,
+                )
+            ]
         return [
             self._make_task(
                 task_type="qa_tasks",
@@ -613,13 +846,22 @@ class AnalysisRunService:
             )
         ]
 
-    def _build_risks(self, retrieved_chunks: list[RetrievedChunk]) -> list[str]:
+    def _build_risks(self, retrieved_chunks: list[RetrievedChunk], *, language: LanguageCode = "en") -> list[str]:
+        if language == "ru":
+            risks = [
+                "Генерация embeddings и pgvector similarity остаются выключенными до надежного пайплайна embeddings."
+            ]
+            if len(retrieved_chunks) < 2:
+                risks.append("Анализ основан на узком контексте и может пропустить междокументные ограничения.")
+            if not self._has_signal(retrieved_chunks, self._signals("acceptance")):
+                risks.append("Критерии приемки выведены из ограниченного контекста и требуют проверки человеком.")
+            return risks
         risks = [
             "Embedding generation and pgvector similarity remain disabled until a robust embedding pipeline is added."
         ]
         if len(retrieved_chunks) < 2:
             risks.append("The analysis is grounded in a narrow slice of context and may miss cross-document constraints.")
-        if not self._has_signal(retrieved_chunks, ("acceptance", "criteria", "test", "validate")):
+        if not self._has_signal(retrieved_chunks, self._signals("acceptance")):
             risks.append("Acceptance expectations were inferred from limited context and should be reviewed by a human.")
         return risks
 
@@ -630,12 +872,25 @@ class AnalysisRunService:
         retrieved_chunks: list[RetrievedChunk],
     ) -> list[str]:
         questions: list[str] = []
+        language = payload.language or "en"
         if payload.document_ids and len(documents) != len(payload.document_ids):
-            questions.append("Should missing requested documents block analysis creation instead of producing a partial result?")
-        if not self._has_signal(retrieved_chunks, ("frontend", "ui", "screen")):
-            questions.append("Is there any frontend scope for this feature, or should the frontend task list remain empty?")
+            questions.append(
+                "Should missing requested documents block analysis creation instead of producing a partial result?"
+                if language == "en"
+                else "Должны ли отсутствующие выбранные документы блокировать анализ вместо частичного результата?"
+            )
+        if not self._has_signal(retrieved_chunks, ("frontend", "ui", "screen", "интерфейс", "экран", "клиент")):
+            questions.append(
+                "Is there any frontend scope for this feature, or should the frontend task list remain empty?"
+                if language == "en"
+                else "Есть ли frontend-scope для этой задачи или список frontend-задач должен остаться пустым?"
+            )
         if not self.retrieval.vector_search_enabled():
-            questions.append("Which embedding model and ingestion trigger should activate pgvector similarity in the next milestone?")
+            questions.append(
+                "Which embedding model and ingestion trigger should activate pgvector similarity in the next milestone?"
+                if language == "en"
+                else "Какая модель embeddings и какой триггер ingest должны включить pgvector similarity в следующем milestone?"
+            )
         return questions
 
     def _build_assumptions(
@@ -644,6 +899,16 @@ class AnalysisRunService:
         documents: list[Document],
         retrieved_chunks: list[RetrievedChunk],
     ) -> list[str]:
+        if payload.language == "ru":
+            assumptions = [
+                "В этом milestone доступны только загруженные документы `.txt` и `.md` как подтвержденные источники.",
+                "Детерминированного ранжирования достаточно до внедрения реальных embeddings.",
+            ]
+            if not documents and payload.document_kind:
+                assumptions.append(f"Фильтр типа документа '{payload.document_kind}' используется без явно выбранных документов.")
+            if retrieved_chunks:
+                assumptions.append("Самые релевантные найденные фрагменты считаются представительными для контекста запроса.")
+            return assumptions
         assumptions = [
             "Only uploaded `.txt` and `.md` documents are available as grounded sources in this milestone.",
             "The deterministic retrieval ranking is sufficient until real embeddings are introduced.",
@@ -674,7 +939,7 @@ class AnalysisRunService:
     @staticmethod
     def _has_signal(retrieved_chunks: Iterable[RetrievedChunk], signals: tuple[str, ...]) -> bool:
         haystack = " ".join(chunk.text.lower() for chunk in retrieved_chunks)
-        return any(signal in haystack for signal in signals)
+        return has_any(haystack, signals)
 
     @staticmethod
     def _primary_component(retrieved_chunks: list[RetrievedChunk], fallback: str) -> str:
@@ -729,6 +994,7 @@ class AnalysisRunService:
             input_type=run.input_type,
             input_text=run.input_text or "",
             input_file_reference=run.input_file_reference,
+            language=(run.request_payload or {}).get("language") or (clarification.language if clarification else "en"),
             review_status=run.review_status,
             reviewer_note=run.reviewer_note or "",
             document_id=run.document_id,
