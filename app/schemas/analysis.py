@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 ReviewStatus = Literal["draft", "reviewed", "approved", "rejected"]
 TaskType = Literal["feature", "enhancement", "bug", "technical_task", "spike"]
 InputType = Literal["text", "file"]
+Language = Literal["en", "ru"]
 AnalysisStatus = Literal[
     "draft",
     "needs_clarification",
@@ -56,6 +57,7 @@ class AnalysisOutput(BaseModel):
 class InitialAnalysisOutput(BaseModel):
     request_summary: str
     task_type: TaskType
+    language: Language = "en"
     understood_scope: list[str] = Field(default_factory=list)
     suspected_affected_components: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
@@ -70,6 +72,7 @@ class AnalysisRunCreateRequest(BaseModel):
     input_type: InputType = "text"
     input_text: str = ""
     input_file_reference: str | None = None
+    language: Language | None = None
     query: str = Field(
         default="Summarize the implementation work required by the selected documents.",
         min_length=1,
@@ -89,6 +92,7 @@ class AnalysisRunResponse(AnalysisOutput):
     input_type: str = "text"
     input_text: str = ""
     input_file_reference: str | None = None
+    language: Language = "en"
     review_status: ReviewStatus
     reviewer_note: str = ""
     document_id: UUID | None = None

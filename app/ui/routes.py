@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from app.schemas.project import ProjectCreateRequest
 from app.services.analysis_runs import AnalysisRunService
 from app.services.exports import JiraExportError, JiraExportService
 from app.services.ingestion import IngestionService
+from app.services.language import normalize_language
 from app.services.projects import ProjectService
 from app.services.storage import LocalStorage
 from app.ui.rendering import (
@@ -31,21 +32,35 @@ from app.ui.rendering import (
 ui_router = APIRouter(include_in_schema=False)
 
 
+def _ui_language(request: Request) -> str:
+    return normalize_language(request.query_params.get("lang") or request.cookies.get("ui_lang"))
+
+
+def _html(request: Request, content: str, *, status_code: int = status.HTTP_200_OK) -> HTMLResponse:
+    response = HTMLResponse(content, status_code=status_code)
+    if request.query_params.get("lang"):
+        response.set_cookie("ui_lang", _ui_language(request), max_age=60 * 60 * 24 * 365, samesite="lax")
+    return response
+
+
 @ui_router.get("/", response_class=HTMLResponse)
-def dashboard(db: Session = Depends(get_db)) -> HTMLResponse:
+def dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     documents = IngestionService(db).list_documents()
     runs = AnalysisRunService(db).list_runs()
-    return HTMLResponse(render_dashboard(documents, runs))
+    language = _ui_language(request)
+    return _html(request, render_dashboard(documents, runs, language=language))
 
 
 @ui_router.get("/projects", response_class=HTMLResponse)
-def projects_page(db: Session = Depends(get_db)) -> HTMLResponse:
+def projects_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     projects = ProjectService(db).list_projects()
-    return HTMLResponse(render_projects_page(projects))
+    language = _ui_language(request)
+    return _html(request, render_projects_page(projects, language=language))
 
 
 @ui_router.post("/projects")
 async def create_project_ui(
+    request: Request,
     name: str = Form(...),
     description: str = Form(default=""),
     source_type: str = Form(...),
@@ -64,28 +79,29 @@ async def create_project_ui(
         project = await service.create_project(payload, archive=archive if archive and archive.filename else None)
     except ValueError as exc:
         projects = service.list_projects()
-        return HTMLResponse(render_projects_page(projects, error=str(exc)), status_code=status.HTTP_400_BAD_REQUEST)
+        return _html(request, render_projects_page(projects, error=str(exc), language=_ui_language(request)), status_code=status.HTTP_400_BAD_REQUEST)
     return RedirectResponse(url=f"/projects/{project.id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @ui_router.get("/projects/{project_id}", response_class=HTMLResponse)
-def project_detail(project_id: UUID, db: Session = Depends(get_db)) -> HTMLResponse:
+def project_detail(project_id: UUID, request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     project_service = ProjectService(db)
     project = project_service.get_project(project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     runs = AnalysisRunService(db).list_runs()
-    return HTMLResponse(render_project_detail(project, runs))
+    return _html(request, render_project_detail(project, runs, language=_ui_language(request)))
 
 
 @ui_router.get("/documents", response_class=HTMLResponse)
-def documents_page(db: Session = Depends(get_db)) -> HTMLResponse:
+def documents_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     documents = IngestionService(db).list_documents()
-    return HTMLResponse(render_documents_page(documents))
+    return _html(request, render_documents_page(documents, language=_ui_language(request)))
 
 
 @ui_router.post("/documents/upload")
 async def upload_document_ui(
+    request: Request,
     kind: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -95,41 +111,46 @@ async def upload_document_ui(
         document = await service.ingest_upload(upload=file, kind=kind)
     except ValueError as exc:
         documents = service.list_documents()
-        return HTMLResponse(render_documents_page(documents, error=str(exc)), status_code=status.HTTP_400_BAD_REQUEST)
+        return _html(request, render_documents_page(documents, error=str(exc), language=_ui_language(request)), status_code=status.HTTP_400_BAD_REQUEST)
 
     return RedirectResponse(url=f"/documents/{document.id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @ui_router.get("/documents/{document_id}", response_class=HTMLResponse)
-def document_detail(document_id: UUID, db: Session = Depends(get_db)) -> HTMLResponse:
+def document_detail(document_id: UUID, request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     ingestion_service = IngestionService(db)
     document = ingestion_service.get_document(document_id)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     runs = AnalysisRunService(db).list_runs()
-    return HTMLResponse(render_document_detail(document, runs))
+    return _html(request, render_document_detail(document, runs, language=_ui_language(request)))
 
 
 @ui_router.get("/analysis-runs/new", response_class=HTMLResponse)
 def new_analysis_page(
+    request: Request,
     document_id: UUID | None = Query(default=None),
     project_id: UUID | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     documents = IngestionService(db).list_documents()
     projects = ProjectService(db).list_projects()
-    return HTMLResponse(
+    language = _ui_language(request)
+    return _html(
+        request,
         render_new_analysis_page(
             documents,
             projects,
             selected_document_id=str(document_id) if document_id else None,
             selected_project_id=str(project_id) if project_id else None,
+            language=language,
         )
     )
 
 
 @ui_router.post("/analysis-runs")
 async def create_analysis_run_ui(
+    request: Request,
     project_id: UUID = Form(...),
     task_type: str = Form(...),
     input_text: str = Form(default=""),
@@ -154,6 +175,7 @@ async def create_analysis_run_ui(
         input_type=input_type,
         input_text=input_text,
         input_file_reference=input_file_reference,
+        language=_ui_language(request),
         query=query,
         document_ids=document_ids,
         document_kind=document_kind or None,
@@ -162,34 +184,36 @@ async def create_analysis_run_ui(
     try:
         run = AnalysisRunService(db).create_run(payload)
     except ValueError as exc:
-        return HTMLResponse(
-            render_new_analysis_page(documents, projects, error=str(exc), selected_project_id=str(project_id)),
+        return _html(
+            request,
+            render_new_analysis_page(documents, projects, error=str(exc), selected_project_id=str(project_id), language=_ui_language(request)),
             status_code=status.HTTP_400_BAD_REQUEST,
         )
     return RedirectResponse(url=f"/analysis-runs/{run.id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @ui_router.get("/analysis-runs", response_class=HTMLResponse)
-def analysis_runs_page(db: Session = Depends(get_db)) -> HTMLResponse:
+def analysis_runs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     runs = AnalysisRunService(db).list_runs()
-    return HTMLResponse(render_analysis_runs_page(runs))
+    return _html(request, render_analysis_runs_page(runs, language=_ui_language(request)))
 
 
 @ui_router.get("/clarifications", response_class=HTMLResponse)
-def clarifications_page(db: Session = Depends(get_db)) -> HTMLResponse:
+def clarifications_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     runs = AnalysisRunService(db).list_runs()
-    return HTMLResponse(render_clarifications_page(runs))
+    return _html(request, render_clarifications_page(runs, language=_ui_language(request)))
 
 
 @ui_router.get("/results", response_class=HTMLResponse)
-def results_page(db: Session = Depends(get_db)) -> HTMLResponse:
+def results_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     runs = AnalysisRunService(db).list_results()
-    return HTMLResponse(render_results_page(runs))
+    return _html(request, render_results_page(runs, language=_ui_language(request)))
 
 
 @ui_router.get("/analysis-runs/{analysis_run_id}", response_class=HTMLResponse)
 def analysis_run_detail(
     analysis_run_id: UUID,
+    request: Request,
     updated: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -197,7 +221,7 @@ def analysis_run_detail(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis run not found")
     success = "Review status updated." if updated == "1" else None
-    return HTMLResponse(render_analysis_run_detail(run, success=success))
+    return _html(request, render_analysis_run_detail(run, success=success, language=_ui_language(request)))
 
 
 @ui_router.post("/analysis-runs/{analysis_run_id}/clarifications")
@@ -220,6 +244,7 @@ def answer_clarification_ui(
 @ui_router.get("/analysis-runs/{analysis_run_id}/export", response_class=HTMLResponse)
 def analysis_run_export_preview(
     analysis_run_id: UUID,
+    request: Request,
     project_key: str | None = Query(default=None),
     issue_type: str | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -236,7 +261,7 @@ def analysis_run_export_preview(
     except JiraExportError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    return HTMLResponse(render_export_preview_page(preview))
+    return _html(request, render_export_preview_page(preview, language=_ui_language(request)))
 
 
 @ui_router.post("/analysis-runs/{analysis_run_id}/review")
@@ -260,6 +285,7 @@ def update_analysis_review_ui(
 @ui_router.post("/analysis-runs/{analysis_run_id}/export")
 def execute_export_ui(
     analysis_run_id: UUID,
+    request: Request,
     project_key: str = Form(default=""),
     issue_type: str = Form(default=""),
     confirm: str = Form(default=""),
@@ -283,9 +309,10 @@ def execute_export_ui(
             )
         )
     except JiraExportError as exc:
-        return HTMLResponse(
-            render_export_preview_page(preview, error=str(exc)),
+        return _html(
+            request,
+            render_export_preview_page(preview, error=str(exc), language=_ui_language(request)),
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    return HTMLResponse(render_export_preview_page(preview, result=result))
+    return _html(request, render_export_preview_page(preview, result=result, language=_ui_language(request)))
