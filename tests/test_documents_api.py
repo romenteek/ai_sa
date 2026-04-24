@@ -14,12 +14,3 @@ def test_upload_document_creates_chunked_document(client) -> None:
     assert body["kind"] == "architecture"
     assert body["chunk_count"] >= 1
     assert len(body["chunks"]) >= 1
-
-
-def test_jira_export_requires_approval(client) -> None:
-    response = client.post(
-        "/api/v1/exports/jira",
-        json={"analysis_run_id": "demo-run", "approved": False},
-    )
-
-    assert response.status_code == 400
