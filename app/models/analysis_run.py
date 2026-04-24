@@ -17,6 +17,16 @@ class AnalysisRun(Base):
         ForeignKey("documents.id", ondelete="SET NULL"),
         nullable=True,
     )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    task_type: Mapped[str] = mapped_column(String(40), nullable=False, default="feature")
+    input_type: Mapped[str] = mapped_column(String(40), nullable=False, default="text")
+    input_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_file_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
     reviewer_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -25,10 +35,17 @@ class AnalysisRun(Base):
         default=dict,
     )
     output_payload: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=dict)
+    clarification_payload: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=dict)
     validation_notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     document: Mapped["Document | None"] = relationship(back_populates="analysis_runs")
+    project: Mapped["Project | None"] = relationship(back_populates="analysis_runs")
+    clarification_rounds: Mapped[list["ClarificationRound"]] = relationship(
+        back_populates="analysis_run",
+        cascade="all, delete-orphan",
+        order_by="ClarificationRound.round_index",
+    )
     generated_tasks: Mapped[list["GeneratedTask"]] = relationship(
         back_populates="analysis_run",
         cascade="all, delete-orphan",
